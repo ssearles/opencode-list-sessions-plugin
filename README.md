@@ -46,19 +46,30 @@ These appear in the TUI prompt and in the desktop command palette.
 
 | Command | What it does |
 | --- | --- |
-| `/archived` | List archived sessions. |
-| `/archive` | Archive the current session, or the ones named after it. |
-| `/unarchive <id or title>` | Restore an archived session. |
-| `/session <id or title>` | Print a transcript — works on archived sessions too. |
+| `/list` | Every session — working first, then archived — with copyable ids. |
+| `/archive` | List open sessions as a numbered menu. |
+| `/archive <n \| id \| title>` | Archive that session. |
+| `/unarchive` | List archived sessions as a numbered menu. |
+| `/unarchive <n \| id \| title>` | Restore that session. |
+| `/session` | List all sessions as a numbered menu. |
+| `/session <n \| id \| title>` | Print a transcript — archived ones work too. |
+
+Run a command with no argument and it prints a numbered list; run it again
+with the number to act. Typing an id or part of a title works too.
+
+OpenCode offers plugins no way to show a real picker — the TUI event bus
+carries only `command.execute`, `prompt.append`, `session.select` and
+`toast.show`, and a plugin's context exposes `event.subscribe` but no
+publish. Numbered menus are the closest equivalent available from a plugin.
 
 ```text
-/archived
-**2 archived session(s)**
+/unarchive
+**Archived sessions**
 
-ses_ee288811cffe4ffi…    499 msg  2026-10-09  Diagnosing 2TB external drive
-ses_eddd5348bffezT7…    284 msg  2026-10-09  Delete outdated GitHub repositories
+1. ses_ee288811cffe4ffi…    499 msg  2026-10-09  Diagnosing 2TB external drive
+2. ses_eddd5348bffezT7…    284 msg  2026-10-09  Delete outdated GitHub repositories
 
-Restore one with `/unarchive <id or title>`.
+Restore one with `/unarchive <number>`, or name it directly.
 ```
 
 ## Tools

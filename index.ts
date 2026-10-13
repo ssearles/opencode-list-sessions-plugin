@@ -139,6 +139,122 @@ function parseArgs(text: string): string[] {
     .filter((t) => t && !t.startsWith("/"))
 }
 
+/**
+ * Render sessions as a numbered menu.
+ *
+ * OpenCode gives plugins no way to show a real picker — the TUI bus only
+ * carries `command.execute`, `prompt.append`, `session.select` and
+ * `toast.show`, none of which displays a list, and a plugin's context exposes
+ * `event.subscribe` with no publish. So a dropdown is not reachable from here.
+ *
+ * Numbered rows are the closest equivalent that works today: the user types a
+ * digit instead of a title fragment, and the numbering is stable for the list
+ * just printed.
+ */
+function menu(
+  rows: SessionRow[],
+  opts: { heading: string; empty: string; action: string; limit?: number },
+): string {
+  if (rows.length === 0) return opts.empty
+
+  const limit = opts.limit ?? 20
+  const shown = rows.slice(0, limit)
+  const width = String(shown.length).length
+
+  return [
+    `**${opts.heading}**`,
+    "",
+    ...shown.map((r, i) => `${String(i + 1).padStart(width)}. ${describe(r)}`),
+    ...(rows.length > shown.length
+      ? ["", `…and ${rows.length - shown.length} more. Narrow by title instead.`]
+      : []),
+    "",
+    opts.action,
+  ].join("\n")
+}
+
+/** One line per session, with the full id so it can be selected and copied. */
+function inventoryRow(r: SessionRow): string {
+  const msgs = r.messages === null ? "?" : String(r.messages).padStart(4)
+  const state = r.archived ? "archived" : "working"
+  return `${state.padEnd(8)} ${msgs} msg  ${when(r.updated)}  ${r.title}\n              ${r.id}`
+}
+
+/**
+ * `/list` — the whole inventory: working sessions first, then archived.
+ *
+ * This is a read-only reference rather than a numbered menu. The point is that
+ * every line carries its full session id, so the user can select a row with the
+ * mouse and paste it straight into `/archive`, `/unarchive` or `/session`.
+ *
+ * Numbering is deliberately omitted: the two orderings here (`/archive` counts
+ * working only, `/unarchive` counts archived only) are both subsets of this
+ * list, so a single shared numbering would not match either menu. Copying an id
+ * is unambiguous, where a remembered number would not be.
+ */
+function inventory(all: SessionRow[], limit = 60): string {
+  if (all.length === 0) return "No sessions found."
+
+  const working = all.filter((r) => !r.archived)
+  const archived = all.filter((r) => r.archived)
+
+  const block = (heading: string, rows: SessionRow[]) => {
+    if (rows.length === 0) return [`**${heading}**`, "", "_none_"]
+    const shown = rows.slice(0, limit)
+    return [
+      `**${heading}** (${rows.length})`,
+      "",
+      ...shown.map(inventoryRow),
+      ...(rows.length > shown.length ? ["", `…and ${rows.length - shown.length} more.`] : []),
+    ]
+  }
+
+  const sections: string[] = []
+  if (working.length) sections.push(block("Working", working).join("\n"))
+  if (archived.length) sections.push(block("Archived", archived).join("\n"))
+
+  const hidden = all.length > limit * 2 ? ["", "Some sessions were omitted."] : []
+
+  return [
+    ...sections,
+    ...hidden,
+    "",
+    "Copy a line's id into `/archive <id>`, `/unarchive <id>` or `/session <id>`.",
+  ].join("\n\n")
+}
+
+/**
+ * Resolve a bare 1-based index against a list, as typed in response to a menu.
+ *
+ * Only digits are treated as a position, so an id or title fragment always
+ * wins over a number. Out-of-range values fall through to the normal resolver
+ * so the user gets "nothing matched" rather than a silent no-op.
+ */
+async function pickByNumber(
+  args: string[],
+  rows: SessionRow[],
+  s: SessionStore,
+): Promise<{ ids: string[]; ambiguous: boolean }> {
+  const numeric = args.filter((a) => /^\d+$/.test(a))
+  if (numeric.length !== args.length) return resolve(args)
+
+  const ids: string[] = []
+  let ambiguous = false
+
+  for (const a of numeric) {
+    const n = Number(a)
+    if (n >= 1 && n <= rows.length) ids.push(rows[n - 1].id)
+    else {
+      // Fall back to a normal lookup for out-of-range values.
+      const viaText = await resolve([a])
+      ids.push(...viaText.ids)
+      ambiguous ||= viaText.ambiguous
+    }
+  }
+
+  return { ids: [...new Set(ids)], ambiguous }
+}
+
 const REMINDER =
   "\n\nReloading OpenCode will pick this up, because the write happens outside " +
   "the server and emits no session update event."
@@ -154,26 +270,12 @@ export default {
 
     await ctx.command.transform((editor) => {
       editor.add({
-        name: "archived",
-        description: "List archived OpenCode sessions",
-        execute: async ({ sessionID, prompt }) => {
+        name: "list",
+        description: "List every session — working first, then archived — with copyable ids",
+        execute: async ({ sessionID }) => {
           try {
             const s = await store()
-            const rows = await s.list({ archived: "only" })
-            if (rows.length === 0) {
-              await say(sessionID, "No archived sessions.")
-              return
-            }
-            await say(
-              sessionID,
-              [
-                `**${rows.length} archived session(s)**`,
-                "",
-                ...rows.map(describe),
-                "",
-                "Restore one with `/unarchive <id or title>`.",
-              ].join("\n"),
-            )
+            await say(sessionID, inventory(await s.list()))
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -182,19 +284,43 @@ export default {
 
       editor.add({
         name: "archive",
-        description: "Archive the current session, or the sessions named after it",
+        description: "Show open sessions to archive, or archive the one you name",
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
-            const args = parseArgs(prompt?.text ?? "")
-            const ids = args.length === 0 ? [sessionID] : (await resolve(args)).ids
+
+            // No argument: show the open sessions as a numbered menu. This is
+            // the default rather than archiving the current session, because
+            // that is never what someone means when they open the command list.
+            if (!prompt?.text?.trim()) {
+              const open = await s.list({ archived: "active" })
+              await say(
+                sessionID,
+                menu(open, {
+                  heading: "Open sessions",
+                  empty: "No open sessions to archive.",
+                  action: "Archive one with `/archive <number>`, or name it directly.",
+                }),
+              )
+              return
+            }
+
+            const args = parseArgs(prompt.text)
+            const open = await s.list({ archived: "active" })
+            const { ids, ambiguous } = await pickByNumber(args, open, s)
+
+            if (ambiguous) {
+              await say(
+                sessionID,
+                `"${args.join(" ")}" matched more than one session, so nothing was archived.`,
+              )
+              return
+            }
             if (ids.length === 0) {
               await say(
                 sessionID,
-                args.length === 0
-                  ? "Nothing to archive."
-                  : `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
-                    "Run `/archived` to see valid ids, or name one exactly.",
+                `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
+                  "Run `/archive` to see the open sessions, or name one exactly.",
               )
               return
             }
@@ -214,28 +340,28 @@ export default {
 
       editor.add({
         name: "session",
-        description: "Show a session transcript by id or title, including archived ones",
+        description: "Show a session transcript by number, id or title",
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
-            const args = parseArgs(prompt?.text ?? "")
-            if (args.length === 0) {
+            if (!prompt?.text?.trim()) {
               await say(
                 sessionID,
-                "Usage: `/session <id or title>` — shows a transcript. Archived sessions work too.",
+                menu(await s.list(), {
+                  heading: "All sessions",
+                  empty: "No sessions found.",
+                  action: "Show one with `/session <number>`, or name it directly.",
+                }),
               )
               return
             }
-            const { ids, ambiguous } = await resolve(args)
+            const args = parseArgs(prompt.text)
+            const { ids, ambiguous } = await pickByNumber(args, await s.list(), s)
             if (ambiguous) {
-              const cands = await s.list()
               await say(
                 sessionID,
-                [
-                  `"${args.join(" ")}" matched more than one session.`,
-                  "",
-                  ...cands.map(describe),
-                ].join("\n"),
+                `"${args.join(" ")}" matched more than one session. ` +
+                  "Name one by number from `/session`, or use a more specific phrase.",
               )
               return
             }
@@ -245,7 +371,7 @@ export default {
               await say(
                 sessionID,
                 `No single session matched "${args.join(" ")}". ` +
-                  `Run \`/archived\` to see valid ids.`,
+                  `Run \`/session\` to see them, or name one exactly.`,
               )
               return
             }
@@ -283,43 +409,44 @@ export default {
 
       editor.add({
         name: "unarchive",
-        description: "Restore an archived session by id or title",
+        description: "Show archived sessions to restore, or restore the one you name",
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
-            const args = parseArgs(prompt?.text ?? "")
-            if (args.length === 0) {
-              const rows = await s.list({ archived: "only" })
+            const rows = await s.list({ archived: "only" })
+
+            if (!prompt?.text?.trim()) {
               await say(
                 sessionID,
-                rows.length === 0
-                  ? "No archived sessions."
-                  : [
-                      `Name a session to restore. Archived sessions:`,
-                      "",
-                      ...rows.map(describe),
-                    ].join("\n"),
+                menu(rows, {
+                  heading: "Archived sessions",
+                  empty: "No archived sessions.",
+                  action: "Restore one with `/unarchive <number>`, or name it directly.",
+                }),
               )
               return
             }
-            const { ids, ambiguous } = await resolve(args)
+
+            const args = parseArgs(prompt.text)
+            const { ids, ambiguous } = await pickByNumber(args, rows, s)
             if (ambiguous) {
-              const cands = await s.list({ archived: "only" })
               await say(
                 sessionID,
                 [
                   `The term "${args.join(" ")}" matched more than one session, ` +
                     "so nothing was restored.",
                   "",
-                  "Name one by id, or use a more specific phrase. Archived sessions:",
-                  "",
-                  ...cands.map(describe),
+                  "Name one by number from the list, or use a more specific phrase.",
                 ].join("\n"),
               )
               return
             }
             if (ids.length === 0) {
-              await say(sessionID, `Nothing matched ${args.join(" ")}. Try \`/archived\`.`)
+              await say(
+                sessionID,
+                `Nothing matched "${args.join(" ")}", so nothing was restored. ` +
+                  "Run `/unarchive` to see the archived sessions.",
+              )
               return
             }
             const { changed, errors, backup } = await s.unarchive(ids)
@@ -500,3 +627,7 @@ export default {
 export { ArchiveError }
 /** Exposed for tests: the argument resolver, which drives destructive commands. */
 export const __resolve = resolve
+/** Exposed for tests: numbered-menu selection and rendering. */
+export const __menu = menu
+export const __pickByNumber = pickByNumber
+export const __inventory = inventory

@@ -369,6 +369,43 @@ export class SessionStore {
   }
 
   /**
+   * How many snapshots to keep in the backups directory.
+   *
+   * Each snapshot is a full copy of the database — tens of megabytes — and one
+   * is taken per write, so without a cap the directory grows without bound.
+   */
+  static readonly RETAIN = 3
+
+  /**
+   * Drop the oldest snapshots beyond `SessionStore.RETAIN`.
+   *
+   * Runs after a successful backup. A failure here is never fatal: pruning is
+   * housekeeping, and losing an old snapshot must not fail the archive that
+   * already succeeded.
+   */
+  async #prune(): Promise<number> {
+    try {
+      const { readdirSync, statSync, unlinkSync } = await import("node:fs")
+      const dir = this.dbPath.replace(/\/[^/]+$/, "/backups")
+      const prefix = `${this.dbPath.split("/").pop()?.replace(/\.db$/, "") ?? "opencode"}.backup-`
+
+      const mine = readdirSync(dir)
+        .filter((f) => f.startsWith(prefix))
+        .map((f) => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+
+      let dropped = 0
+      for (const { f } of mine.slice(SessionStore.RETAIN)) {
+        unlinkSync(join(dir, f))
+        dropped++
+      }
+      return dropped
+    } catch {
+      return 0
+    }
+  }
+
+  /**
    * Snapshot the database with `VACUUM INTO`.
    *
    * Preferred over a file copy because it is consistent even while OpenCode
@@ -416,6 +453,7 @@ export class SessionStore {
     if (unique.length === 0) return { changed: [], errors: [], backup: null }
 
     const backup = await this.backup()
+    await this.#prune()
     const now = Date.now()
     const hasUpdated = this.columns.has("time_updated")
 
