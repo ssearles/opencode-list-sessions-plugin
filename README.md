@@ -66,9 +66,16 @@ Restore one with `/unarchive <id or title>`.
 The agent can call these directly:
 
 - `session_archive.list_archived` — list, optionally filtered by text
-- `session_archive.read` — read a transcript, archived or not
+- `session_archive.read_transcript` — read a transcript, archived or not
 - `session_archive.archive` — archive by id
 - `session_archive.unarchive` — restore by id
+
+Tools are namespaced by passing `options: { namespace: "session_archive" }` on
+each one. That is not cosmetic. The host derives a tool's id from
+`options.namespace` and falls back to the bare name when it is absent, so a
+tool registered without it shares a flat registry with the built-ins and a name
+like `read` silently replaces the host's own. Calling `namespace()` on the
+editor only records a display description and does not namespace anything.
 
 ## Safety
 

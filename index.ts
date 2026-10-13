@@ -32,6 +32,17 @@ interface ToolEditor {
     name: string
     description: string
     input: Record<string, unknown>
+    /**
+     * `options.namespace` is what actually namespaces the tool.
+     *
+     * Calling `namespace()` above only records a display descriptor — it does
+     * not affect the tool id. The host builds each id as
+     * `<namespace>_<name>`, falling back to a bare `<name>` when
+     * `options.namespace` is absent. Omitting it therefore registers the tool
+     * in the same flat registry as the core tools, where a name like `read`
+     * silently replaces the host's own.
+     */
+    options?: { namespace?: string }
     execute(input: any, context?: { signal?: AbortSignal }): Promise<{ content: string }>
   }): void
 }
@@ -336,15 +347,22 @@ export default {
 
     // ---- tools (the agent can call these) ----
 
+    /**
+     * Every tool must set `options.namespace` explicitly, otherwise the host
+     * registers it under its bare name and it can shadow a core tool.
+     */
+    const NS = "session_archive"
+
     await ctx.tool.transform((editor) => {
       editor.namespace({
-        name: "session_archive",
+        name: NS,
         description: "Archive and restore OpenCode sessions that are no longer needed.",
       })
 
       editor.add({
         name: "list_archived",
         description: "List archived OpenCode sessions. Optionally filter by text.",
+        options: { namespace: NS },
         input: {
           type: "object",
           properties: { search: { type: "string" } },
@@ -369,6 +387,7 @@ export default {
       editor.add({
         name: "archive",
         description: "Archive one or more sessions by id so they leave the active list.",
+        options: { namespace: NS },
         input: {
           type: "object",
           properties: {
@@ -397,11 +416,14 @@ export default {
       })
 
       editor.add({
-        name: "read",
+        // Not `read`: an unnamespaced tool of that name replaces the host's own
+        // read tool, which breaks every other request that touches a file.
+        name: "read_transcript",
         description:
           "Read a session transcript as text. Works on archived sessions, which " +
           "OpenCode's own UI cannot display — use this to review an old session " +
           "before restoring it.",
+        options: { namespace: NS },
         input: {
           type: "object",
           properties: {
@@ -438,6 +460,7 @@ export default {
         description:
           "Restore archived sessions by id. This is the only way to recover a session " +
           "that has been archived, because OpenCode provides no API for it.",
+        options: { namespace: NS },
         input: {
           type: "object",
           properties: {
