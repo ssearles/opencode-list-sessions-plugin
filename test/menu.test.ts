@@ -20,7 +20,7 @@ import { join } from "node:path"
 import { after, before, describe, it } from "node:test"
 
 import { SessionStore } from "../src/db.ts"
-import { __menu, __pickByNumber, __inventory } from "../index.ts"
+import { __menu, __pickByNumber, __inventory, __parseArgs } from "../index.ts"
 import type { SessionRow } from "../src/db.ts"
 
 const SCHEMA = `
@@ -93,6 +93,41 @@ describe("numbered menus", () => {
     const out = __menu(all, { heading: "x", empty: "none", action: "y", limit: 2 })
     assert.match(out, /…and 2 more/)
     assert.equal(out.split("\n").filter((l) => /^\d+\./.test(l)).length, 2)
+  })
+})
+
+describe("prompt text parsing", () => {
+  // The host passes the whole submitted line, command name included. Testing
+  // the raw text for emptiness therefore never fires, the command falls
+  // through to the argument path, and no menu is ever shown. This is the bug
+  // that made /archive appear to do nothing.
+  const parse = __parseArgs
+
+  it("treats a bare command name as no argument", () => {
+    assert.deepEqual(parse("/archive"), [])
+    assert.deepEqual(parse("/unarchive"), [])
+    assert.deepEqual(parse("/session"), [])
+  })
+
+  it("treats empty and missing text as no argument", () => {
+    assert.deepEqual(parse(""), [])
+    assert.deepEqual(parse("   "), [])
+    assert.deepEqual(parse(undefined), [])
+  })
+
+  it("keeps the argument after the command name", () => {
+    assert.deepEqual(parse("/archive 3"), ["3"])
+    assert.deepEqual(parse("/unarchive ses_abc"), ["ses_abc"])
+    assert.deepEqual(parse("/session Delete outdated GitHub repositories"), [
+      "Delete",
+      "outdated",
+      "GitHub",
+      "repositories",
+    ])
+  })
+
+  it("handles a palette click, which sends no text at all", () => {
+    assert.deepEqual(parse(undefined), [])
   })
 })
 

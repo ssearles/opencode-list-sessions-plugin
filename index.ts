@@ -132,8 +132,18 @@ async function resolve(
   return { ids: [...new Set(ids)], ambiguous }
 }
 
-function parseArgs(text: string): string[] {
-  return text
+/**
+ * Pull the arguments out of a command's prompt text.
+ *
+ * The host passes the whole submitted line, command name included, so `/archive`
+ * arrives as the text `"/archive"` rather than `""`. Testing the raw text for
+ * emptiness therefore never fires and the command falls through to the
+ * argument path, where nothing matches. Tokens starting with `/` are the
+ * command name and are dropped, so an empty result means "no argument" however
+ * the command was invoked — palette click, typed, or sent with no text.
+ */
+function parseArgs(text: string | undefined): string[] {
+  return (text ?? "")
     .trim()
     .split(/\s+/)
     .filter((t) => t && !t.startsWith("/"))
@@ -288,11 +298,12 @@ export default {
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
+            const args = parseArgs(prompt?.text)
 
             // No argument: show the open sessions as a numbered menu. This is
             // the default rather than archiving the current session, because
             // that is never what someone means when they open the command list.
-            if (!prompt?.text?.trim()) {
+            if (args.length === 0) {
               const open = await s.list({ archived: "active" })
               await say(
                 sessionID,
@@ -304,8 +315,6 @@ export default {
               )
               return
             }
-
-            const args = parseArgs(prompt.text)
             const open = await s.list({ archived: "active" })
             const { ids, ambiguous } = await pickByNumber(args, open, s)
 
@@ -344,7 +353,8 @@ export default {
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
-            if (!prompt?.text?.trim()) {
+            const args = parseArgs(prompt?.text)
+            if (args.length === 0) {
               await say(
                 sessionID,
                 menu(await s.list(), {
@@ -355,7 +365,6 @@ export default {
               )
               return
             }
-            const args = parseArgs(prompt.text)
             const { ids, ambiguous } = await pickByNumber(args, await s.list(), s)
             if (ambiguous) {
               await say(
@@ -413,9 +422,10 @@ export default {
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
+            const args = parseArgs(prompt?.text)
             const rows = await s.list({ archived: "only" })
 
-            if (!prompt?.text?.trim()) {
+            if (args.length === 0) {
               await say(
                 sessionID,
                 menu(rows, {
@@ -426,8 +436,6 @@ export default {
               )
               return
             }
-
-            const args = parseArgs(prompt.text)
             const { ids, ambiguous } = await pickByNumber(args, rows, s)
             if (ambiguous) {
               await say(
@@ -631,3 +639,5 @@ export const __resolve = resolve
 export const __menu = menu
 export const __pickByNumber = pickByNumber
 export const __inventory = inventory
+/** Exposed for tests: prompt-text argument parsing. */
+export const __parseArgs = parseArgs
