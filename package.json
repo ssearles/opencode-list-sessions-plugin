@@ -5,13 +5,14 @@
   "keywords": ["opencode", "opencode-plugin", "session", "archive", "unarchive", "restore"],
   "license": "MIT",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./index.ts"
   },
-  "files": ["src/"],
+  "files": ["index.ts", "src/"],
   "scripts": {
     "test": "node --test test/",
+    "check": "node -e \"Promise.all([import('./index.ts'),import('./src/db.ts')]).then(()=>console.log('modules load OK')).catch(e=>{console.error(e);process.exit(1)})\"",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

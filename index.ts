@@ -11,7 +11,7 @@
  * ever touch `time_archived` and `time_updated` — never a single message.
  */
 
-import { ArchiveError, SessionStore, type SessionRow } from "./db.ts"
+import { ArchiveError, SessionStore, type SessionRow } from "./src/db.ts"
 
 /**
  * Minimal structural types for the slice of the plugin context this plugin
@@ -61,30 +61,64 @@ function describe(r: SessionRow): string {
 }
 
 /**
- * Resolve ids from free-form arguments. Accepts explicit session ids and
- * otherwise falls back to a substring match on id/title/directory.
+ * Resolve session ids from free-form arguments.
+ *
+ * Matching is deliberately conservative, because this feeds destructive
+ * commands. Splitting a title into words and matching each one separately
+ * would mean `/unarchive my big session` also restored anything else
+ * containing "big", so instead:
+ *
+ *   1. an exact session id always wins
+ *   2. otherwise the whole argument is matched as one phrase against the title
+ *   3. otherwise a prefix match, then a substring match, are tried in turn
+ *
+ * The broadest match is used only when it is unambiguous. An ambiguous term
+ * resolves to nothing rather than to several sessions, because restoring the
+ * wrong session is worse than asking the user to be more specific.
  */
-async function resolve(args: string[]): Promise<{ ids: string[]; matches: SessionRow[] }> {
+async function resolve(
+  args: string[],
+): Promise<{ ids: string[]; ambiguous: boolean }> {
   const s = await store()
+  const all = await s.list()
   const ids: string[] = []
-  const matches: SessionRow[] = []
+  let ambiguous = false
+
   for (const raw of args) {
     const term = raw.trim()
     if (!term) continue
-    const all = await s.list()
+
     if (all.some((r) => r.id === term)) {
       ids.push(term)
       continue
     }
-    const hit = all.filter(
-      (r) =>
-        r.id.toLowerCase().includes(term.toLowerCase()) ||
-        r.title.toLowerCase().includes(term.toLowerCase()),
-    )
-    matches.push(...hit)
-    ids.push(...hit.map((r) => r.id))
+
+    const needle = term.toLowerCase()
+    const byField = (r: SessionRow, field: "title" | "directory") =>
+      (r[field] ?? "").toLowerCase()
+
+    // Narrowest first: phrase, then prefix, then substring.
+    const tiers: SessionRow[][] = [
+      all.filter((r) => byField(r, "title").includes(needle)),
+      all.filter((r) => byField(r, "title").startsWith(needle)),
+      all.filter(
+        (r) =>
+          byField(r, "title").includes(needle) ||
+          byField(r, "directory").includes(needle) ||
+          r.id.toLowerCase().includes(needle),
+      ),
+    ]
+
+    const tier = tiers.find((t) => t.length > 0)
+    if (!tier || tier.length === 0) continue
+    if (tier.length > 1) {
+      ambiguous = true
+      continue
+    }
+    ids.push(tier[0].id)
   }
-  return { ids: [...new Set(ids)], matches }
+
+  return { ids: [...new Set(ids)], ambiguous }
 }
 
 function parseArgs(text: string): string[] {
@@ -144,7 +178,13 @@ export default {
             const args = parseArgs(prompt?.text ?? "")
             const ids = args.length === 0 ? [sessionID] : (await resolve(args)).ids
             if (ids.length === 0) {
-              await say(sessionID, "Nothing matched to archive.")
+              await say(
+                sessionID,
+                args.length === 0
+                  ? "Nothing to archive."
+                  : `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
+                    "Run `/archived` to see valid ids, or name one exactly.",
+              )
               return
             }
             const { changed, errors, backup } = await s.archive(ids)
@@ -175,15 +215,27 @@ export default {
               )
               return
             }
-            const term = args.join(" ")
-            const all = await s.list()
-            const hit =
-              all.find((r) => r.id === term) ??
-              all.find((r) => r.id.toLowerCase().includes(term.toLowerCase())) ??
-              (await s.find(term))[0]
+            const { ids, ambiguous } = await resolve(args)
+            if (ambiguous) {
+              const cands = await s.list()
+              await say(
+                sessionID,
+                [
+                  `"${args.join(" ")}" matched more than one session.`,
+                  "",
+                  ...cands.map(describe),
+                ].join("\n"),
+              )
+              return
+            }
 
+            const hit = ids.length === 1 ? await s.get(ids[0]) : undefined
             if (!hit) {
-              await say(sessionID, `No session matched "${term}". Try \`/archived\`.`)
+              await say(
+                sessionID,
+                `No single session matched "${args.join(" ")}". ` +
+                  `Run \`/archived\` to see valid ids.`,
+              )
               return
             }
 
@@ -239,7 +291,22 @@ export default {
               )
               return
             }
-            const { ids } = await resolve(args)
+            const { ids, ambiguous } = await resolve(args)
+            if (ambiguous) {
+              const cands = await s.list({ archived: "only" })
+              await say(
+                sessionID,
+                [
+                  `The term "${args.join(" ")}" matched more than one session, ` +
+                    "so nothing was restored.",
+                  "",
+                  "Name one by id, or use a more specific phrase. Archived sessions:",
+                  "",
+                  ...cands.map(describe),
+                ].join("\n"),
+              )
+              return
+            }
             if (ids.length === 0) {
               await say(sessionID, `Nothing matched ${args.join(" ")}. Try \`/archived\`.`)
               return
@@ -408,3 +475,5 @@ export default {
 }
 
 export { ArchiveError }
+/** Exposed for tests: the argument resolver, which drives destructive commands. */
+export const __resolve = resolve

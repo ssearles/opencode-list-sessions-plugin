@@ -184,6 +184,18 @@ function layoutSuite(name: string, schema: string, table: string, msgs: string) 
       assert.deepEqual(r, { changed: [], errors: [], backup: null })
     })
 
+    it("does not let a broad substring match many sessions at once", async () => {
+      // Guards the regression where `/unarchive ZZ fix verify` restored every
+      // session whose title contained the word "fix".
+      const s = await open()
+      await s.archive(["ses_a", "ses_b", "ses_c"])
+      const byTitle = await s.find("session ses_")
+      // All three seeded sessions share "Session ses_x" as a title fragment.
+      assert.equal(byTitle.length, 3)
+      // A narrower term is unambiguous.
+      assert.equal((await s.find("ses_a")).length, 1)
+    })
+
     it("searches id, title and directory", async () => {
       const s = await open()
       assert.equal((await s.find("ses_a")).length, 1)
