@@ -1,0 +1,6 @@
+node_modules/
+*.tsbuildinfo
+
+# Database snapshots written by the plugin at runtime.
+backups/
+*.backup-*.db

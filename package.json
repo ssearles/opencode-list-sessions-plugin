@@ -1,0 +1,28 @@
+{
+  "name": "opencode-session-archive",
+  "version": "0.1.0",
+  "description": "OpenCode plugin to archive, list, read and restore sessions — including sessions OpenCode itself can no longer bring back.",
+  "keywords": ["opencode", "opencode-plugin", "session", "archive", "unarchive", "restore"],
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src/"],
+  "scripts": {
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  }
+}
