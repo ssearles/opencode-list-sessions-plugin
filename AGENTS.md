@@ -171,3 +171,28 @@ tsconfig.json     # noEmit, strict, include: src/** test/**
 - Default DB: `~/.local/share/opencode/opencode.db` (or `XDG_DATA_HOME/opencode/opencode.db`)
 - Override with `OPENCODE_DB` env var (used by tests)
 - Requires Node 22+ or Bun
+## Never Check Out `master` Here (Rule)
+This directory is not just a working copy — it is the **live plugin source**
+that the user's OpenCode is executing from, configured by absolute path in
+`~/.config/opencode/opencode.json`. A `git checkout` changes production.
+
+The file watcher reloads the plugin on every save, so the moment a checkout
+lands, whatever is on disk is live. This has bitten twice:
+
+- `master` predated the namespacing fix, so checking it out registered bare
+  `read`, `archive` and `unarchive`, replacing the host's core read tool and
+  breaking every request that touched a file.
+- A mid-merge checkout flashed stale tools before the pull completed.
+
+**Rule: develop on a branch, merge on GitHub, never switch branches in this
+directory while OpenCode is running.** `master` is not a place to visit locally.
+
+If a branch must be checked out, stop OpenCode first, and verify afterwards:
+
+```bash
+curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config/opencode/service.json'))['password'])")" \
+  http://127.0.0.1:49374/api/command | python3 -c "import sys,json;print([c['name'] for c in json.load(sys.stdin)['data']])"
+```
+
+Expect exactly `['init', 'review', 'save']`. Anything else means a stale
+checkout is live.
