@@ -53,6 +53,30 @@ Ambiguous terms resolve to **nothing** (not multiple sessions). This prevents `/
 - Fixtures: each test file builds its own throwaway DB in a temp dir via `OPENCODE_DB` env var
 - Run with `node --test test/` — no TypeScript compilation needed
 
+## Why There Is No Dropdown (tested — do not retry)
+OpenCode renders `/model` as a real popup. That popup is **not bespoke** — it is a
+*form* with a `multiselect` field whose `options` are the model list, and the
+server exposes the whole lifecycle over HTTP (`POST /api/session/{id}/form`,
+`GET .../form/{fid}`, `POST .../reply`, `DELETE ...`). `Form.Option` is
+`{value, label, description}`, which maps exactly onto a session row.
+
+**A form created by a plugin does not render.** Verified twice on v2.0.24:
+
+1. Posted directly to the API outside any turn — stayed pending, never drawn.
+2. Created from *inside* a command execution, i.e. mid-turn, the state `/model`
+   uses — still never drawn. The session showed no change at all.
+
+The client evidently renders a form only in specific built-in flows. A plugin
+also has no `form` key on its context; reaching the API means reading the
+password from `~/.config/opencode/service.json` and looping back to
+`127.0.0.1`, which would be unacceptable to ship even if it worked.
+
+The TUI event bus carries only `command.execute`, `prompt.append`,
+`session.select` and `toast.show`, and a plugin's context exposes
+`event.subscribe` with **no publish**, so a plugin cannot raise any UI itself.
+
+Numbered text menus are the ceiling. That is a deliberate, tested decision.
+
 ## Common Gotchas
 - **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's id as `<namespace>_<name>`, falling back to a bare `<name>` when `options.namespace` is absent. `editor.namespace({name})` only records a display descriptor — it namespaces nothing. A tool named `read` without it **replaces the host's own read tool** and breaks every request that touches a file. This took the plugin offline once; `test/namespacing.test.ts` guards it, and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`, `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced.
 - **Desktop app doesn't restart the background service** — closing/reopening the window reuses the existing `opencode-cli serve --service` process. Must run `opencode reload` or kill the service process to pick up config/plugin changes.

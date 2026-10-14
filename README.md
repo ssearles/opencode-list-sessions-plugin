@@ -57,10 +57,18 @@ These appear in the TUI prompt and in the desktop command palette.
 Run a command with no argument and it prints a numbered list; run it again
 with the number to act. Typing an id or part of a title works too.
 
-OpenCode offers plugins no way to show a real picker — the TUI event bus
-carries only `command.execute`, `prompt.append`, `session.select` and
-`toast.show`, and a plugin's context exposes `event.subscribe` but no
-publish. Numbered menus are the closest equivalent available from a plugin.
+OpenCode offers plugins no way to show a real picker. The `/model` popup is
+not bespoke — it is a *form* whose `multiselect` options are the model list, and
+the server exposes the full form lifecycle over HTTP — but a form created by a
+plugin does not render. This was tested directly: posted outside a turn it
+stayed pending and was never drawn, and created from inside a command execution
+it was still never drawn. The client renders forms only in its own built-in
+flows. The TUI event bus carries only `command.execute`, `prompt.append`,
+`session.select` and `toast.show`, and a plugin's context exposes
+`event.subscribe` with no publish, so a plugin cannot raise UI itself.
+
+Numbered menus are the ceiling. Ids are shown in full on `/list` so they can be
+selected and copied.
 
 ```text
 /unarchive
