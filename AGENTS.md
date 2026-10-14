@@ -77,6 +77,31 @@ The TUI event bus carries only `command.execute`, `prompt.append`,
 
 Numbered text menus are the ceiling. That is a deliberate, tested decision.
 
+## Plugin Commands Are Type-Only (desktop)
+The desktop command palette dispatches through `tui.command.execute`, whose
+schema is a **fixed enum** of built-in names only:
+
+```
+session.list, session.new, session.share, session.interrupt, session.background,
+session.compact, session.page.up, session.page.down, session.line.up,
+session.line.down, session.half.page.up, session.half.page.down, session.first,
+session.last, prompt.clear, prompt.submit, agent.cycle
+```
+
+No plugin command appears in that enum and it is compiled into the client, so
+**clicking `/list`, `/archive` or `/unarchive` in the palette does nothing at
+all.** The commands must be typed. A plugin cannot register into the enum.
+
+This also plausibly explains an intermittent case where `/archive 2` did
+nothing while `/archive 1` worked: if the autocomplete dropdown is still open
+when Enter is pressed, the click path runs and matches nothing. Unverified, but
+consistent.
+
+## `/session` Is Hidden From The Palette
+`/session` is registered on the service (`GET /api/command` returns it) yet
+does not appear in the desktop palette. Cause unknown — possibly reserved as a
+built-in name. If renaming it is ever considered, check first.
+
 ## Common Gotchas
 - **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's id as `<namespace>_<name>`, falling back to a bare `<name>` when `options.namespace` is absent. `editor.namespace({name})` only records a display descriptor — it namespaces nothing. A tool named `read` without it **replaces the host's own read tool** and breaks every request that touches a file. This took the plugin offline once; `test/namespacing.test.ts` guards it, and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`, `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced.
 - **Desktop app doesn't restart the background service** — closing/reopening the window reuses the existing `opencode-cli serve --service` process. Must run `opencode reload` or kill the service process to pick up config/plugin changes.
