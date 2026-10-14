@@ -1,6 +1,6 @@
 {
   "name": "opencode-session-transcript",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenCode plugin that exports a session as readable Markdown. A correct /export: unlike the built-in it reads the whole session from SQLite, not just the loaded portion.",
   "keywords": [
     "export",
