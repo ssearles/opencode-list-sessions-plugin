@@ -1,15 +1,25 @@
 {
-  "name": "opencode-session-archive",
+  "name": "opencode-session-transcript",
   "version": "0.1.0",
-  "description": "OpenCode plugin to archive, list, read and restore sessions — including sessions OpenCode itself can no longer bring back.",
-  "keywords": ["opencode", "opencode-plugin", "session", "archive", "unarchive", "restore"],
+  "description": "OpenCode plugin that exports a session as readable Markdown. A correct /export: unlike the built-in it reads the whole session from SQLite, not just the loaded portion.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session",
+    "export",
+    "transcript",
+    "markdown"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts"
   },
-  "files": ["index.ts", "src/"],
+  "files": [
+    "index.ts",
+    "src/"
+  ],
   "scripts": {
     "test": "node --test test/",
     "check": "node -e \"Promise.all([import('./index.ts'),import('./src/db.ts')]).then(()=>console.log('modules load OK')).catch(e=>{console.error(e);process.exit(1)})\"",
@@ -25,5 +35,9 @@
     "@opencode/plugin": {
       "optional": true
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ssearles/opencode-session-archive.git"
   }
 }

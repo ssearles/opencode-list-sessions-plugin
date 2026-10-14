@@ -369,6 +369,83 @@ export class SessionStore {
   }
 
   /**
+   * Raw message rows, oldest first.
+   *
+   * Unlike {@link readMessages} this does not parse the payload — it returns
+   * `type` and the JSON blob untouched, so callers that need tool calls or
+   * structure (a transcript writer, say) are not limited to display text.
+   */
+  async messages(sessionID: string): Promise<{ type: string; data: string }[]> {
+    const db = await this.#connect()
+    try {
+      const tables = new Set(
+        (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+          name: string
+        }[]).map((r) => r.name),
+      )
+
+      for (const table of ["session_message", "message"]) {
+        if (!tables.has(table)) continue
+        const cols = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+            (r) => r.name,
+          ),
+        )
+        if (!cols.has("session_id")) continue
+        const order = cols.has("seq") ? "seq ASC" : cols.has("time_created") ? "time_created ASC" : "rowid ASC"
+        const rows = db
+          .prepare(`SELECT type, data FROM ${table} WHERE session_id = ? ORDER BY ${order}`)
+          .all(sessionID) as { type?: unknown; data?: unknown }[]
+        return rows.map((r) => ({
+          type: String(r.type ?? ""),
+          data: String(r.data ?? ""),
+        }))
+      }
+
+      return []
+    } finally {
+      db.close()
+    }
+  }
+
+  /**
+   * How many snapshots to keep in the backups directory.
+   *
+   * Each snapshot is a full copy of the database — tens of megabytes — and one
+   * is taken per write, so without a cap the directory grows without bound.
+   */
+  static readonly RETAIN = 3
+
+  /**
+   * Drop the oldest snapshots beyond `SessionStore.RETAIN`.
+   *
+   * Runs after a successful backup. A failure here is never fatal: pruning is
+   * housekeeping, and losing an old snapshot must not fail the archive that
+   * already succeeded.
+   */
+  async #prune(): Promise<number> {
+    try {
+      const { readdirSync, statSync, unlinkSync } = await import("node:fs")
+      const dir = this.dbPath.replace(/\/[^/]+$/, "/backups")
+      const prefix = `${this.dbPath.split("/").pop()?.replace(/\.db$/, "") ?? "opencode"}.backup-`
+
+      const mine = readdirSync(dir)
+        .filter((f) => f.startsWith(prefix))
+        .map((f) => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+
+      let dropped = 0
+      for (const { f } of mine.slice(SessionStore.RETAIN)) {
+        unlinkSync(join(dir, f))
+        dropped++
+      }
+      return dropped
+    } catch {
+      return 0
+    }
+  }
+
+  /**
    * Snapshot the database with `VACUUM INTO`.
    *
    * Preferred over a file copy because it is consistent even while OpenCode
@@ -416,6 +493,7 @@ export class SessionStore {
     if (unique.length === 0) return { changed: [], errors: [], backup: null }
 
     const backup = await this.backup()
+    await this.#prune()
     const now = Date.now()
     const hasUpdated = this.columns.has("time_updated")
 
