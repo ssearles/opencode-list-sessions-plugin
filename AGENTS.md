@@ -97,10 +97,14 @@ nothing while `/archive 1` worked: if the autocomplete dropdown is still open
 when Enter is pressed, the click path runs and matches nothing. Unverified, but
 consistent.
 
-## `/session` Is Hidden From The Palette
-`/session` is registered on the service (`GET /api/command` returns it) yet
-does not appear in the desktop palette. Cause unknown — possibly reserved as a
-built-in name. If renaming it is ever considered, check first.
+## `/session` Was Never Special
+It once looked anomalous: registered on the service, typed fine, but absent
+from the palette while `/list`, `/archive` and `/unarchive` appeared. That was
+wrong — **none** of the plugin's commands appear in the palette, and none can be
+invoked by clicking one. `/session` was simply the one nobody had typed yet.
+
+Do not rename it to "fix" the palette. Renaming changes nothing; the palette
+only dispatches the built-in enum listed above.
 
 ## Deep Links Are Plumbed But Not Implemented (2.0.24)
 The desktop app registers `opencode://` as a protocol handler, so
