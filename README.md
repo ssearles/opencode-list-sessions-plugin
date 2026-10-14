@@ -90,19 +90,35 @@ driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
 
 | Command | Effect |
 | --- | --- |
-| `/save` | Write to `~/Documents/<session title>.md` |
+| `/save` | Write the current session to `~/Documents/<session title>.md` |
 | `/save ~/Desktop/today.md` | Write wherever you say |
+| `/unarchive` | List archived sessions |
+| `/unarchive <n \| id \| title>` | Restore one |
 
 Set `OPENCODE_TRANSCRIPT_DIR` to change the default folder.
 
-The filename comes from the session's own title, read at run time. Two sessions
+Filenames come from the session's own title, read at run time. Two sessions
 sharing a title will overwrite each other — pass an explicit path to keep both.
+
+### About `/unarchive`
+
+There is deliberately no matching `/archive`. Archiving hides a session without
+removing it, and OpenCode's project view already makes everything findable
+again, so on offer it solves nothing. Restoring something archived by mistake
+is a genuine gap, though — without it, an archived session is unreachable short
+of hand-written SQL — so that is the half that ships.
+
+An ambiguous term restores nothing rather than guessing: a title fragment that
+matches two sessions will ask you to be more specific rather than pick one.
 
 ## Safety
 
-- **Read-only.** The plugin never writes to OpenCode's database. It only reads
-  `session_v2` and `session_message` and writes one Markdown file of its own.
-- No archiving, no deletion, no backups, no state. Nothing to undo.
+- `/save` is **read-only**. It only reads `session_v2` and `session_message` and
+  writes one Markdown file of its own.
+- `/unarchive` **does** write, and takes a `VACUUM INTO` snapshot first, which is
+  consistent while OpenCode holds the database open in WAL mode. It only ever
+  sets `time_archived` and `time_updated` — never a message. It also keeps the
+  three most recent snapshots and prunes older ones.
 - Schema-agnostic: discovers `session_v2` (v2.x) or `session` (v1.x) and
   introspects its columns rather than hardcoding either.
 

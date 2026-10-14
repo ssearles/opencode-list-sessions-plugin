@@ -56,6 +56,66 @@ function transcriptDir(): string {
 }
 
 /**
+ * Resolve session ids from free-form arguments against a known list.
+ *
+ * Narrowest-first, because this drives a write:
+ *
+ *   1. an exact session id always wins
+ *   2. a bare number is a 1-based position in the list just printed
+ *   3. otherwise a title substring, then a broader id/directory substring
+ *
+ * A term matching more than one session resolves to nothing — restoring the
+ * wrong session is worse than asking for a more specific one.
+ */
+function resolve(args: string[], rows: SessionRow[]): { ids: string[]; ambiguous: boolean } {
+  const ids: string[] = []
+  let ambiguous = false
+
+  for (const raw of args) {
+    const term = raw.trim()
+    if (!term) continue
+
+    if (rows.some((r) => r.id === term)) {
+      ids.push(term)
+      continue
+    }
+
+    if (/^\d+$/.test(term)) {
+      const n = Number(term)
+      if (n >= 1 && n <= rows.length) ids.push(rows[n - 1].id)
+      continue
+    }
+
+    const needle = term.toLowerCase()
+    const byTitle = rows.filter((r) => r.title.toLowerCase().includes(needle))
+    // Fall back only when the narrow match found nothing — `[]` is truthy, so
+    // this cannot be written as `||`.
+    const hits =
+      byTitle.length > 0
+        ? byTitle
+        : rows.filter(
+            (r) =>
+              r.directory.toLowerCase().includes(needle) ||
+              r.id.toLowerCase().includes(needle),
+          )
+
+    if (hits.length > 1) {
+      ambiguous = true
+      continue
+    }
+    if (hits.length === 1) ids.push(hits[0].id)
+  }
+
+  return { ids: [...new Set(ids)], ambiguous }
+}
+
+/** `HH:MM` from a millisecond timestamp. */
+function clock(ms: number | null | undefined): string {
+  if (!ms) return ""
+  return new Date(ms).toISOString().slice(11, 16)
+}
+
+/**
  * Human-readable form of the default output directory, for the command
  * description. Uses `~` rather than an expanded home path so the popup reads
  * the same on every machine rather than naming one user's account.
@@ -130,8 +190,90 @@ export default {
           }
         },
       })
+
+      /**
+       * Restore an archived session.
+       *
+       * Deliberately one-directional: there is no matching `/archive`. Archiving
+       * hides a session without removing it, and OpenCode's own project view
+       * already covers finding sessions again — so on offer it solves nothing.
+       * This exists only to undo a mistake, which is a genuine gap: without it,
+       * anything archived by mistake is unrecoverable short of hand-written SQL.
+       */
+      editor.add({
+        name: "unarchive",
+        description: "Restore an archived OpenCode session by number or id",
+        execute: async ({ sessionID, prompt }) => {
+          try {
+            const store = await SessionStore.open()
+            const args = (prompt?.text ?? "")
+              .trim()
+              .split(/\s+/)
+              .filter((t) => t && !t.startsWith("/"))
+
+            const archived = await store.list({ archived: "only" })
+
+            if (args.length === 0) {
+              await say(
+                sessionID,
+                archived.length === 0
+                  ? "No archived sessions."
+                  : [
+                      "**Archived sessions**",
+                      "",
+                      ...archived.map(
+                        (r, i) =>
+                          `${i + 1}. ${r.title}\n   ${clock(r.updated)} · ${r.messages ?? "?"} msg · \`${r.id}\``,
+                      ),
+                      "",
+                      "Restore one with `/unarchive <number>`.",
+                    ].join("\n"),
+              )
+              return
+            }
+
+            // A bare number indexes the list just printed; anything else is
+            // matched as an id or title fragment.
+            const { ids, ambiguous } = resolve(
+              args,
+              archived,
+            )
+            if (ambiguous) {
+              await say(
+                sessionID,
+                `"${args.join(" ")}" matched more than one archived session, so nothing was restored. Run \`/unarchive\` to see them.`,
+              )
+              return
+            }
+            if (ids.length === 0) {
+              await say(
+                sessionID,
+                `Nothing archived matches "${args.join(" ")}". Run \`/unarchive\` to see the list.`,
+              )
+              return
+            }
+
+            const { changed, errors } = await store.unarchive(ids)
+            const lines = [`Restored ${changed.length} session(s).`]
+            for (const id of changed) {
+              const row = await store.get(id)
+              lines.push(`  ${row?.title ?? id}`)
+            }
+            if (errors.length) lines.push("", "Failed:", ...errors.map((e) => `  ${e}`))
+            lines.push("", "A reload will show them again — these are hidden from the UI while archived.")
+            await say(sessionID, lines.join("\n"))
+          } catch (err) {
+            await say(
+              sessionID,
+              `Error: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        },
+      })
     })
   },
 }
 
 export { slug, toMarkdown }
+/** Exposed for tests: argument resolution for /unarchive. */
+export const __resolve = resolve
