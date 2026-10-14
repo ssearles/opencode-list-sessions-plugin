@@ -102,6 +102,12 @@ sharing a title will overwrite each other — pass an explicit path to keep both
 
 ### About `/unarchive`
 
+**Planned deprecation:** `/unarchive` will be removed in a future major
+version. Restoring an archived session belongs in OpenCode core, not in a
+stopgap for `/export`, and keeping it here muddies what this package is for.
+Expect it to move to a separate plugin rather than disappear — OpenCode's UI
+can archive a session but offers no way to undo it.
+
 There is deliberately no matching `/archive`. Archiving hides a session without
 removing it, and OpenCode's project view already makes everything findable
 again, so on offer it solves nothing. Restoring something archived by mistake
