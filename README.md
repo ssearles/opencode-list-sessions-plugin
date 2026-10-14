@@ -2,10 +2,11 @@
 
 A correct `/export` for OpenCode, in plugin form.
 
-> **Status: this is a stopgap.** It exists because `/export` is broken in ways
-> documented upstream. Once those are fixed, this plugin should be retired and
-> its behaviour folded into `/export` proper. Please don't treat it as a
-> long-term dependency.
+> **This is a stopgap** for bugs in `/export`
+> ([#50732](https://github.com/anomalyco/opencode/issues/50732),
+> [#50014](https://github.com/anomalyco/opencode/issues/50014)) that are being
+> fixed upstream. Once those land, this should be retired in favour of a
+> correct `/export`.
 
 ## The problem
 
@@ -119,9 +120,9 @@ assumed.
 
 ## Upstream
 
-If `/export` is fixed — desktop parity plus the truncation fix — **this plugin
-has served its purpose and should be deleted.** The right outcome is not this
-becoming essential infrastructure, it's `/export` becoming correct.
+Once `/export` is correct — desktop parity plus the truncation fix — this
+plugin should be retired. The goal is for `/export` to work properly, not for
+this to become infrastructure anyone depends on.
 
 ## Licence
 
