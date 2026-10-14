@@ -84,6 +84,8 @@ Restore one with `/unarchive <number>`, or name it directly.
 
 The agent can call these directly:
 
+- `session_archive.list_sessions` — list with ids; `archived` is `all`,
+  `active` or `only`
 - `session_archive.list_archived` — list, optionally filtered by text
 - `session_archive.read_transcript` — read a transcript, archived or not
 - `session_archive.archive` — archive by id

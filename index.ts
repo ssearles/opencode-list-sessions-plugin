@@ -495,6 +495,48 @@ export default {
       })
 
       editor.add({
+        // Not `list`: that is a core tool name, and test/namespacing.test.ts
+        // rightly refuses to reuse one even when namespaced.
+        name: "list_sessions",
+        description:
+          "List OpenCode sessions with their ids. Defaults to every session; " +
+          "set archived to 'active' for working sessions or 'only' for archived. " +
+          "Use this to show a numbered list the user can then pick from by number.",
+        options: { namespace: NS },
+        input: {
+          type: "object",
+          properties: {
+            archived: {
+              type: "string",
+              enum: ["all", "active", "only"],
+              description: "Which sessions to list. Default all.",
+            },
+            search: { type: "string", description: "Filter by id, title or directory." },
+          },
+          additionalProperties: false,
+        },
+        execute: async (input: { archived?: "all" | "active" | "only"; search?: string }) => {
+          const s = await store()
+          const archived = input.archived ?? "all"
+          const rows = input.search
+            ? await s.find(input.search, { archived })
+            : await s.list({ archived })
+
+          if (rows.length === 0) return { content: "No sessions matched." }
+
+          return {
+            content: rows
+              .map(
+                (r) =>
+                  `${r.id}\t${r.archived ? "archived" : "working"}\t${r.messages ?? "?"} msg\t` +
+                  `${when(r.updated)}\t${r.directory || "-"}\t${r.title}`,
+              )
+              .join("\n"),
+          }
+        },
+      })
+
+      editor.add({
         name: "list_archived",
         description: "List archived OpenCode sessions. Optionally filter by text.",
         options: { namespace: NS },
