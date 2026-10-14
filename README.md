@@ -1,149 +1,128 @@
-# opencode-session-archive
+# opencode-session-transcript
 
-Archive, list, **read**, and restore OpenCode sessions — including sessions
-OpenCode itself can no longer bring back.
+A correct `/export` for OpenCode, in plugin form.
+
+> **Status: this is a stopgap.** It exists because `/export` is broken in ways
+> documented upstream. Once those are fixed, this plugin should be retired and
+> its behaviour folded into `/export` proper. Please don't treat it as a
+> long-term dependency.
 
 ## The problem
 
-OpenCode can archive a session, but there is no supported way to un-archive one:
+OpenCode can export a session, but `/export` has three separate shortcomings:
 
-- The HTTP API ignores changes to `time_archived`. `PATCH /api/session/{id}`
-  with `{"time":{"archived":null}}` returns `204` and does nothing.
-- The CLI offers only `session list`, `export`, `import`, and `delete`.
-- Archived sessions are not offered anywhere in the UI, and global session
-  search is not scoped by directory, so they still show up in searches.
+**It silently truncates.** [#50732](https://github.com/anomalyco/opencode/issues/50732)
+and [#50014](https://github.com/anomalyco/opencode/issues/50014) both report
+that `/export` writes only the messages currently loaded in the TUI, not the
+full transcript. In a long session, early prompts and responses are simply
+absent — and nothing warns you, so the file looks complete. This is the worst
+possible failure mode for an export tool, because you only find out when you go
+looking for something that isn't there.
 
-Net effect: **archiving is effectively one-way.** If you archive something by
-mistake there is no supported recovery, which is why several people have asked
-for this upstream ([#24153], [#6680]).
+**It means different things in different clients.**
+[#48105](https://github.com/anomalyco/opencode/issues/48105) documents that
+`/export` in the TUI produces human-readable Markdown while `opencode export`
+on the CLI produces JSON for re-import. The desktop app's `/export` follows the
+JSON behaviour, so there is no Markdown export there at all.
 
-This plugin closes that gap.
+**There is no CLI equivalent that reads well.** `opencode session export` gives
+you a multi-megabyte JSON file — correct and complete, but not something you
+would ever read end to end.
+
+## What this does
+
+One command. It reads every message for the current session straight out of
+OpenCode's SQLite store and writes them to a Markdown file you can actually
+read.
+
+```
+/save
+```
+
+```
+/home/steven/Documents/archiving-older-ai-conversations.md
+
+835 messages · 234 KB
+```
+
+The output is the same conversation you'd expect to read, with tool calls kept
+inline and assistant reasoning dropped:
+
+```markdown
+# Archiving older AI conversations
+
+**Started:** 2026-10-13 11:43
+**Directory:** `/home/steven/Documents/Default Project`
+**Session id:** `ses_ec96bff81ffdMzlHLBZmD0r2Nj`
+
+### You · 11:43
+can I archive older AI conversations to free up session space...
+
+### Assistant · 11:43
+I'll check the OpenCode docs on sessions and CLI settings.
+
+**[tool]** `webfetch` — completed
+```
+
+Because it reads the database rather than the UI's loaded window, the output is
+complete regardless of how much of the thread you have scrolled.
 
 ## Install
-
-Add it to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-session-archive"]
+  "plugins": ["opencode-session-transcript"]
 }
 ```
 
-Or point at a local checkout, which is how you run it from source:
+Or point at a local checkout:
 
 ```jsonc
-{ "plugins": ["/absolute/path/to/opencode-session-archive"] }
+{ "plugins": ["/absolute/path/to/opencode-session-transcript"] }
 ```
 
-Then restart OpenCode. No dependencies are installed at runtime; the plugin
-uses whichever SQLite driver the host provides (`bun:sqlite` under Bun,
-`node:sqlite` under Node 22+).
+No dependencies are installed at runtime. The plugin uses whichever SQLite
+driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
 
-## Commands
+## Usage
 
-These appear in the TUI prompt and in the desktop command palette.
-
-| Command | What it does |
+| Command | Effect |
 | --- | --- |
-| `/list` | Every session — working first, then archived — with copyable ids. |
-| `/archive` | List open sessions as a numbered menu. |
-| `/archive <n \| id \| title>` | Archive that session. |
-| `/unarchive` | List archived sessions as a numbered menu. |
-| `/unarchive <n \| id \| title>` | Restore that session. |
-| `/session` | List all sessions as a numbered menu. |
-| `/session <n \| id \| title>` | Print a transcript — archived ones work too. |
+| `/save` | Write to `~/Documents/<session title>.md` |
+| `/save ~/Desktop/today.md` | Write wherever you say |
 
-Run a command with no argument and it prints a numbered list; run it again
-with the number to act. Typing an id or part of a title works too.
+Set `OPENCODE_TRANSCRIPT_DIR` to change the default folder.
 
-OpenCode offers plugins no way to show a real picker. The `/model` popup is
-not bespoke — it is a *form* whose `multiselect` options are the model list, and
-the server exposes the full form lifecycle over HTTP — but a form created by a
-plugin does not render. This was tested directly: posted outside a turn it
-stayed pending and was never drawn, and created from inside a command execution
-it was still never drawn. The client renders forms only in its own built-in
-flows. The TUI event bus carries only `command.execute`, `prompt.append`,
-`session.select` and `toast.show`, and a plugin's context exposes
-`event.subscribe` with no publish, so a plugin cannot raise UI itself.
-
-Numbered menus are the ceiling. Ids are shown in full on `/list` so they can be
-selected and copied.
-
-```text
-/unarchive
-**Archived sessions**
-
-1. ses_ee288811cffe4ffi…    499 msg  2026-10-09  Diagnosing 2TB external drive
-2. ses_eddd5348bffezT7…    284 msg  2026-10-09  Delete outdated GitHub repositories
-
-Restore one with `/unarchive <number>`, or name it directly.
-```
-
-## Tools
-
-The agent can call these directly:
-
-- `session_archive.list_sessions` — list with ids; `archived` is `all`,
-  `active` or `only`
-- `session_archive.list_archived` — list, optionally filtered by text
-- `session_archive.read_transcript` — read a transcript, archived or not
-- `session_archive.archive` — archive by id
-- `session_archive.unarchive` — restore by id
-
-Tools are namespaced by passing `options: { namespace: "session_archive" }` on
-each one. That is not cosmetic. The host derives a tool's id from
-`options.namespace` and falls back to the bare name when it is absent, so a
-tool registered without it shares a flat registry with the built-ins and a name
-like `read` silently replaces the host's own. Calling `namespace()` on the
-editor only records a display description and does not namespace anything.
+The filename comes from the session's own title, read at run time. Two sessions
+sharing a title will overwrite each other — pass an explicit path to keep both.
 
 ## Safety
 
-- The database is **never deleted from**. Messages are never touched. Only
-  `time_archived` and `time_updated` are written.
-- Every write takes a consistent snapshot first, via `VACUUM INTO`, which is
-  safe while OpenCode holds the database open in WAL mode. Snapshots land in
-  `~/.local/share/opencode/backups/`.
-- Writes are transactional and per-session, so one bad id does not abort the
-  rest.
-- Unknown ids are reported, not thrown.
-
-## How restoring works
-
-Clearing the flag alone is not enough. OpenCode orders sessions by
-`time_updated DESC` and pages per directory, so a session archived weeks ago
-stays buried below the page limit and still cannot be opened. Restoring
-therefore clears `time_archived` **and** refreshes `time_updated`, which
-surfaces it at the top of its original project folder.
-
-Because the write happens outside the server, OpenCode emits no `session.updated`
-event, so the window needs a reload before the change appears.
-
-## Compatibility
-
-| OpenCode | Status |
-| --- | --- |
-| v2.x (`session_v2` table) | Supported, tested |
-| v1.x (`session` table) | Supported, tested |
-
-The plugin discovers which table exists and introspects its columns rather than
-hardcoding either schema.
+- **Read-only.** The plugin never writes to OpenCode's database. It only reads
+  `session_v2` and `session_message` and writes one Markdown file of its own.
+- No archiving, no deletion, no backups, no state. Nothing to undo.
+- Schema-agnostic: discovers `session_v2` (v2.x) or `session` (v1.x) and
+  introspects its columns rather than hardcoding either.
 
 ## Development
 
 ```bash
 npm test          # node --test, no install required
+npm run check     # confirms both modules load
 npm run typecheck # requires typescript
 ```
 
 The test suite builds throwaway databases in **both** schemas and runs the
-entire shared suite against each, so v1 and v2 support is exercised rather than
+shared suite against each, so v1 and v2 support is exercised rather than
 assumed.
+
+## Upstream
+
+If `/export` is fixed — desktop parity plus the truncation fix — **this plugin
+has served its purpose and should be deleted.** The right outcome is not this
+becoming essential infrastructure, it's `/export` becoming correct.
 
 ## Licence
 
 MIT
-
-[#24153]: https://github.com/anomalyco/opencode/issues/24153
-[#6680]: https://github.com/anomalyco/opencode/issues/6680

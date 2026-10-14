@@ -369,6 +369,46 @@ export class SessionStore {
   }
 
   /**
+   * Raw message rows, oldest first.
+   *
+   * Unlike {@link readMessages} this does not parse the payload — it returns
+   * `type` and the JSON blob untouched, so callers that need tool calls or
+   * structure (a transcript writer, say) are not limited to display text.
+   */
+  async messages(sessionID: string): Promise<{ type: string; data: string }[]> {
+    const db = await this.#connect()
+    try {
+      const tables = new Set(
+        (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+          name: string
+        }[]).map((r) => r.name),
+      )
+
+      for (const table of ["session_message", "message"]) {
+        if (!tables.has(table)) continue
+        const cols = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+            (r) => r.name,
+          ),
+        )
+        if (!cols.has("session_id")) continue
+        const order = cols.has("seq") ? "seq ASC" : cols.has("time_created") ? "time_created ASC" : "rowid ASC"
+        const rows = db
+          .prepare(`SELECT type, data FROM ${table} WHERE session_id = ? ORDER BY ${order}`)
+          .all(sessionID) as { type?: unknown; data?: unknown }[]
+        return rows.map((r) => ({
+          type: String(r.type ?? ""),
+          data: String(r.data ?? ""),
+        }))
+      }
+
+      return []
+    } finally {
+      db.close()
+    }
+  }
+
+  /**
    * How many snapshots to keep in the backups directory.
    *
    * Each snapshot is a full copy of the database — tens of megabytes — and one
