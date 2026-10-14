@@ -102,6 +102,37 @@ consistent.
 does not appear in the desktop palette. Cause unknown — possibly reserved as a
 built-in name. If renaming it is ever considered, check first.
 
+## Deep Links Are Plumbed But Not Implemented (2.0.24)
+The desktop app registers `opencode://` as a protocol handler, so
+`opencode://session/<id>` looks like a way to give a plugin clickable navigation.
+
+It does not work. The main process accepts the URL, filters for the `opencode://`
+prefix, logs `deep link received via open-url`, and forwards it to the renderer.
+The renderer parks it in a global and fires an event, then stops:
+
+```js
+window.__OPENCODE__.deepLinks = [...(window.__OPENCODE__.deepLinks ?? []), ...urls]
+window.dispatchEvent(new CustomEvent(`opencode:deep-link`, {detail: {urls}}))
+```
+
+Extracting all 6,652 files from `/usr/lib/opencode-desktop/app.asar` and
+searching every one: exactly one file writes `deepLinks`, exactly one dispatches
+the event, and **nothing listens**. No navigation, no routing.
+
+So there is no clickable navigation available to a plugin, and therefore no way
+to build a child-session picker with a usable way back. This also rules out
+anything else that would need the user to click somewhere.
+
+To re-extract the archive (headers are a size-prefixed JSON, file bodies start
+at `16 + headerLen`):
+
+```python
+import json, struct, pathlib
+d = pathlib.Path("/usr/lib/opencode-desktop/app.asar").read_bytes()
+hl = struct.unpack("<I", d[12:16])[0]
+hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
+```
+
 ## Common Gotchas
 - **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's id as `<namespace>_<name>`, falling back to a bare `<name>` when `options.namespace` is absent. `editor.namespace({name})` only records a display descriptor — it namespaces nothing. A tool named `read` without it **replaces the host's own read tool** and breaks every request that touches a file. This took the plugin offline once; `test/namespacing.test.ts` guards it, and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`, `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced.
 - **Desktop app doesn't restart the background service** — closing/reopening the window reuses the existing `opencode-cli serve --service` process. Must run `opencode reload` or kill the service process to pick up config/plugin changes.
