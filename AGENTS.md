@@ -1,61 +1,126 @@
-# AGENTS.md — opencode-session-archive
+# AGENTS.md — opencode-archive-unarchive-listarchive-savesession
 
 ## Project Overview
-OpenCode plugin to archive, list, read, and restore sessions — including sessions OpenCode itself can no longer bring back. The core problem: OpenCode's API ignores `time_archived` changes, making archiving one-way. This plugin writes directly to SQLite.
+OpenCode plugin to archive, list, read, save and restore sessions — including
+sessions OpenCode itself can no longer bring back.
+
+Two problems, one plugin:
+
+- **Archiving is one-way.** OpenCode's API ignores `time_archived` changes, so an
+  archived session cannot be restored through it. This plugin writes directly to
+  SQLite, and is the only way back.
+- **Export is truncated and unreadable.** The TUI `/export` writes only the
+  messages currently loaded in the window, and both it and
+  `opencode session export` produce JSON. `/save` reads every message for the
+  session straight out of SQLite and writes Markdown.
+
+Forked from `opencode-session-transcript`, which had dropped archiving in
+`f5a38ef` when it pivoted to Markdown export. That commit deleted ~714 lines of
+`index.ts` and all four archive test files. They are restored here, and `/save`
+ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/  (47 tests, no install required)
-npm run check     # verifies both index.ts and src/db.ts load without syntax errors
+npm test          # node --test test/  (105 tests, no install required)
+npm run check     # verifies index.ts and src/db.ts load without syntax errors
 npm run typecheck # tsc --noEmit (requires TypeScript installed)
 ```
 
 ## Architecture Notes
-- **Entry point must be at package root** — OpenCode resolves local plugins but does **not** honor `main`/`exports` pointing into subdirectories. `index.ts` lives at `/`, `src/db.ts` is internal.
-- Zero runtime dependencies: declares `@opencode/plugin` as optional peerDependency but **does not import it**; uses local structural types instead.
-- Dual SQLite driver: `bun:sqlite` (Bun) or `node:sqlite` (Node 22+). Resolved at runtime.
-- Schema-agnostic: discovers `session_v2` (v2) or `session` (v1) at runtime and introspects columns. No hardcoded schemas.
+- **Entry point must be at package root** — OpenCode resolves local plugins but
+  does **not** honor `main`/`exports` pointing into subdirectories. `index.ts`
+  lives at `/`, `src/db.ts` and `src/markdown.ts` are internal.
+- Zero runtime dependencies: declares `@opencode/plugin` as an optional
+  peerDependency but **does not import it**; uses local structural types.
+- Dual SQLite driver: `bun:sqlite` (Bun) or `node:sqlite` (Node 22+). Resolved at
+  runtime.
+- Schema-agnostic: discovers `session_v2` (v2) or `session` (v1) at runtime and
+  introspects columns. No hardcoded schemas.
+- `src/db.ts` came through the fork untouched — the transcript copy is already
+  the archive-era file plus the `messages()` method that Markdown export added.
 
 ## Database Safety Model
 - Only `time_archived` and `time_updated` are ever written — **never messages**.
-- Every write takes a consistent snapshot first via `VACUUM INTO` (WAL-safe). Backups land in `~/.local/share/opencode/backups/`.
+- Every write takes a consistent snapshot first via `VACUUM INTO` (WAL-safe).
+  Backups land in `~/.local/share/opencode/backups/`.
 - Writes are transactional per-session; unknown ids are reported, not thrown.
+- `/save` is **read-only**. It opens the store and renders; it never writes.
 
 ## Critical Behavior: Restoring
-Clearing `time_archived` alone is **not enough**. OpenCode orders sessions by `time_updated DESC` and pages per directory, so a session archived weeks ago stays buried. Restoring **must also refresh `time_updated`** to surface it.
+Clearing `time_archived` alone is **not enough**. OpenCode orders sessions by
+`time_updated DESC` and pages per directory, so a session archived weeks ago
+stays buried. Restoring **must also refresh `time_updated`** to surface it.
 
-## Commands (slash, appear in TUI/desktop)
+## Commands (slash — must be typed, see the palette note below)
 | Command | Purpose |
 |---------|---------|
-| `/archived` | List archived sessions |
-| `/archive [id…]` | Archive current session, or named ones |
-| `/unarchive <id or title>` | Restore — refuses ambiguous terms |
-| `/session <id or title>` | Print transcript (archived included) |
+| `/list` | Numbered inventory of working sessions |
+| `/archive [id…]` | Archive the current session, or named ones |
+| `/session <id or title>` | Print a transcript (archived included) |
+| `/unarchive <n \| id \| title>` | Restore — refuses ambiguous terms |
+| `/save [path.md]` | Write the session to Markdown, default `~/Documents/<title>.md` |
 
-## Tools (agent-callable)
-- `session_archive.list_archived` — list, optional `search`
-- `session_archive.read` — read transcript by id or search
-- `session_archive.archive` — archive by `session_ids[]`
-- `session_archive.unarchive` — restore by `session_ids[]`
+`/save` takes an explicit output path when the argument ends in `.md`, so
+`/save ~/Desktop/today.md` works unconfigured. Otherwise the filename is the
+session's own title, slugified — **two sessions sharing a title will overwrite
+each other**, which is why the explicit form exists. Override the default folder
+with `OPENCODE_TRANSCRIPT_DIR`.
 
-## Argument Resolution (resolver logic)
-Used by `/archive`, `/unarchive`, `/transcript`. **Narrowest-first matching**:
-1. Exact session id always wins
-2. Whole phrase against title
-3. Prefix match on title
-4. Substring on title/directory/id — **only if unambiguous**
+## Tools (agent-callable, namespace `session_archive`)
+| Tool | Purpose |
+|------|---------|
+| `list_sessions` | List working sessions |
+| `list_archived` | List archived sessions, optional `search` |
+| `archive` | Archive by `session_ids[]` |
+| `read_transcript` | Read a transcript by id or search |
+| `unarchive` | Restore by `session_ids[]` |
 
-Ambiguous terms resolve to **nothing** (not multiple sessions). This prevents `/unarchive ZZ fix verify` from restoring every session containing "fix".
+## Argument Resolution — `__resolve` Is Overloaded
+One export serves two eras of this plugin, and **both are exercised by tests**:
+
+- `__resolve(args)` opens the store and resolves narrowest-first against every
+  session. Asynchronous, because reading them is.
+- `__resolve(args, rows)` resolves against rows the caller already has, and is
+  **synchronous**, so a numbered menu can resolve without a second round trip.
+  This is the `opencode-session-transcript` contract: a bare number is a 1-based
+  position in `rows`, an exact id beats a number, and an out-of-range number
+  resolves to nothing rather than falling through to a text match.
+
+Callers that `await` work with either form, since awaiting a plain value is a
+no-op. `test/resolve.test.ts` uses the first form; `test/unarchive.test.ts` uses
+the second. **Changing the signature to a single shape breaks one of them.**
+
+Store-backed matching is narrowest-first: exact id, then whole phrase against
+the title, then prefix, then substring on title/directory/id. Ambiguous terms
+resolve to **nothing** rather than to several sessions — this is what stops
+`/unarchive ZZ fix verify` restoring every session containing "fix".
 
 ## Test Suite Structure
-- `test/db.test.ts` — 36 tests against shared suite run twice (v1 + v2 schemas)
-- `test/resolve.test.ts` — 11 tests for the argument resolver
-- Fixtures: each test file builds its own throwaway DB in a temp dir via `OPENCODE_DB` env var
-- Run with `node --test test/` — no TypeScript compilation needed
+| File | Tests | Covers |
+|------|-------|--------|
+| `test/db.test.ts` | 38 | Shared suite run twice (v1 + v2 schemas), discovery |
+| `test/unarchive.test.ts` | 12 | Sync resolver — the `rows` form of `__resolve` |
+| `test/menu.test.ts` | 24 | Numbered menus, prompt parsing, `/list` inventory, picking by number |
+| `test/markdown.test.ts` | 13 | `messageText`, `slug`, `toMarkdown` |
+| `test/resolve.test.ts` | 9 | Store-backed resolver — the async form of `__resolve` |
+| `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |
+| `test/retention.test.ts` | 4 | Bounded backup snapshots |
+
+Fixtures: each test file builds its own throwaway DB in a temp dir via the
+`OPENCODE_DB` env var. Run with `node --test test/` — no compilation needed.
+
+## Test Suite History — Do Not Trust a Merge to Keep It
+`f5a38ef` deleted four of these test files while rewriting `index.ts`, and a
+later merge of master **silently reproduced that deletion** with zero conflicts:
+git saw master had removed the files and the branch had not touched them, so it
+took the removal. `npm test` then failed 14 tests — which is how it was caught.
+
+**After any merge or rebase, check `git status` for unexpected `D` entries in
+`test/` before believing the suite is green.**
 
 ## Why There Is No Dropdown (tested — do not retry)
-OpenCode renders `/model` as a real popup. That popup is **not bespoke** — it is a
-*form* with a `multiselect` field whose `options` are the model list, and the
+OpenCode renders `/model` as a real popup. That popup is **not** bespoke — it is
+a *form* with a `multiselect` field whose `options` are the model list, and the
 server exposes the whole lifecycle over HTTP (`POST /api/session/{id}/form`,
 `GET .../form/{fid}`, `POST .../reply`, `DELETE ...`). `Form.Option` is
 `{value, label, description}`, which maps exactly onto a session row.
@@ -89,22 +154,17 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list`, `/archive` or `/unarchive` in the palette does nothing at
-all.** The commands must be typed. A plugin cannot register into the enum.
+**clicking `/list`, `/archive`, `/session`, `/unarchive` or `/save` in the
+palette does nothing at all.** The commands must be typed. A plugin cannot
+register into the enum.
 
 This also plausibly explains an intermittent case where `/archive 2` did
 nothing while `/archive 1` worked: if the autocomplete dropdown is still open
 when Enter is pressed, the click path runs and matches nothing. Unverified, but
 consistent.
 
-## `/transcript` Was Never Special
-It once looked anomalous: registered on the service, typed fine, but absent
-from the palette while `/list`, `/archive` and `/unarchive` appeared. That was
-wrong — **none** of the plugin's commands appear in the palette, and none can be
-invoked by clicking one. `/transcript` was simply the one nobody had typed yet.
-
-Do not rename it to "fix" the palette. Renaming changes nothing; the palette
-only dispatches the built-in enum listed above.
+**A command's absence from the palette is never a bug in that command.** Do not
+rename anything to "fix" the palette.
 
 ## Deep Links Are Plumbed But Not Implemented (2.0.24)
 The desktop app registers `opencode://` as a protocol handler, so
@@ -119,13 +179,12 @@ window.__OPENCODE__.deepLinks = [...(window.__OPENCODE__.deepLinks ?? []), ...ur
 window.dispatchEvent(new CustomEvent(`opencode:deep-link`, {detail: {urls}}))
 ```
 
-Extracting all 6,652 files from `/usr/lib/opencode-desktop/app.asar` and
-searching every one: exactly one file writes `deepLinks`, exactly one dispatches
-the event, and **nothing listens**. No navigation, no routing.
+Searching every file in `/usr/lib/opencode-desktop/app.asar`: exactly one writes
+`deepLinks`, exactly one dispatches the event, and **nothing listens**. No
+navigation, no routing.
 
 So there is no clickable navigation available to a plugin, and therefore no way
-to build a child-session picker with a usable way back. This also rules out
-anything else that would need the user to click somewhere.
+to build a child-session picker with a usable way back.
 
 To re-extract the archive (headers are a size-prefixed JSON, file bodies start
 at `16 + headerLen`):
@@ -138,61 +197,100 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
 ```
 
 ## Common Gotchas
-- **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's id as `<namespace>_<name>`, falling back to a bare `<name>` when `options.namespace` is absent. `editor.namespace({name})` only records a display descriptor — it namespaces nothing. A tool named `read` without it **replaces the host's own read tool** and breaks every request that touches a file. This took the plugin offline once; `test/namespacing.test.ts` guards it, and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`, `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced.
-- **Desktop app doesn't restart the background service** — closing/reopening the window reuses the existing `opencode-cli serve --service` process. Must run `opencode reload` or kill the service process to pick up config/plugin changes.
-- **A plugin's config is read from the server's project root**, not the subdirectory you `cd` into. When testing against a throwaway server, put `opencode.json` in the directory the server actually resolves as its location, or it is silently ignored.
-- **`/api/plugin`** is the way to confirm a local plugin loaded (look for `source.type == "local"` and the entry path). There is **no tool-listing endpoint** — verify core tools still work by prompting a throwaway session to use one.
-- `GET /api/session/{id}/message` returns items in **non-chronological order**. Sort by `time.created` before reading the newest output, or you will read a stale message.
-- The `check` script exists because the test suite only covers `src/db.ts`; `index.ts` syntax errors went undetected until manual load testing.
-- Template literals with nested quotes: prefer concatenation (`"foo " + bar + " baz"`) over `` `foo ${bar} baz` `` when the string contains both backticks and quotes.
+- **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's
+  id as `<namespace>_<name>`, falling back to a bare `<name>` when
+  `options.namespace` is absent. `editor.namespace({name})` only records a
+  display descriptor — it namespaces nothing. A tool named `read` without it
+  **replaces the host's own read tool** and breaks every request that touches a
+  file. This took the plugin offline once; `test/namespacing.test.ts` guards it,
+  and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`,
+  `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced. Note the
+  command `/list` and the tool `list_sessions` differ for this reason.
+- **Desktop app doesn't restart the background service** — closing/reopening the
+  window reuses the existing `opencode-cli serve --service` process. Must run
+  `opencode reload` or kill the service process to pick up config/plugin changes.
+- **A plugin's config is read from the server's project root**, not the
+  subdirectory you `cd` into. When testing against a throwaway server, put
+  `opencode.json` in the directory the server actually resolves as its location,
+  or it is silently ignored.
+- **`/api/plugin`** is the way to confirm a local plugin loaded (look for
+  `source.type == "local"` and the entry path). There is **no tool-listing
+  endpoint** — verify core tools still work by prompting a throwaway session to
+  use one.
+- `GET /api/session/{id}/message` returns items in **non-chronological order**.
+  Sort by `time.created` before reading the newest output, or you will read a
+  stale message.
+- The `check` script exists because most of the suite covers `src/db.ts`;
+  `index.ts` syntax errors went undetected until manual load testing.
+- Template literals with nested quotes: prefer concatenation (`"foo " + bar`)
+  over `` `foo ${bar}` `` when the string contains both backticks and quotes.
+- **Cherry-picking an ancestor commit does not work here.** `8a754f6` predates
+  `master`, so replaying it onto master re-applies a diff master already
+  contains and partially undid — every file conflicts add/add. Recovering
+  deleted code means checking it out (`git show f5a38ef^:index.ts`) and porting
+  it forward, not cherry-picking.
 
 ## Verifying a Change End-to-End
 1. `npm test` and `npm run check`
-2. Start a throwaway server: `(setsid opencode serve --port NNNN > log 2>&1 < /dev/null &)` with `opencode.json` in the server's resolved project root.
-3. Password comes from the `server password …` line in the log; all calls use basic auth `opencode:$PW`.
+2. Start a throwaway server: `(setsid opencode serve --port NNNN > log 2>&1 < /dev/null &)`
+   with `opencode.json` in the server's resolved project root.
+3. Password comes from the `server password …` line in the log; all calls use
+   basic auth `opencode:$PW`.
 4. Confirm load: `GET /api/plugin` → `source.type == "local"`.
-5. Confirm commands: `GET /api/command` → expect `archived, archive, session, unarchive` alongside `init, review`.
-6. Confirm no shadowing: prompt a session to use the **core** `read` tool and check it still reads a file.
-7. Confirm function: flip `time_archived` in `session_v2` via `/archive` and `/unarchive`.
-8. Kill the server and delete every test session — they land in the **real** database.
+5. Confirm commands: `GET /api/command` → expect
+   `list, archive, session, unarchive, save` alongside `init, review`.
+6. Confirm no shadowing: prompt a session to use the **core** `read` tool and
+   check it still reads a file.
+7. Confirm function: flip `time_archived` in `session_v2` via `/archive` and
+   `/unarchive`; write a Markdown file via `/save`.
+8. Kill the server and delete every test session — they land in the **real**
+   database.
 
 ## File Layout
 ```
-index.ts          # plugin entry — commands + tools, exports default + __resolve
-src/db.ts         # SessionStore, schema detection, backup, archive/unarchive
-test/db.test.ts   # DB layer tests (both schemas)
-test/resolve.test.ts  # Resolver tests
+index.ts              # plugin entry — commands + tools, test-only exports
+src/db.ts             # SessionStore, schema detection, backup, archive/unarchive
+src/markdown.ts       # messageText, slug, toMarkdown
+test/db.test.ts       # DB layer (both schemas)
+test/unarchive.test.ts    # sync resolver (__resolve with rows)
+test/menu.test.ts         # menus, parsing, inventory, pickByNumber
+test/markdown.test.ts     # Markdown rendering
+test/resolve.test.ts      # store-backed resolver (__resolve with args only)
 test/namespacing.test.ts  # Guards tool namespacing / core-tool collisions
-package.json      # main: "./index.ts", exports: ".": "./index.ts"
-tsconfig.json     # noEmit, strict, include: src/** test/**
+test/retention.test.ts    # Bounded backups
+package.json           # main: "./index.ts", exports: ".": "./index.ts"
+tsconfig.json          # noEmit, strict, include: src/** test/**
 ```
+
+Test-only exports from `index.ts`: `__resolve`, `__menu`, `__pickByNumber`,
+`__inventory`, `__parseArgs`, plus `slug` / `toMarkdown` / `ArchiveError`.
 
 ## Environment
 - Default DB: `~/.local/share/opencode/opencode.db` (or `XDG_DATA_HOME/opencode/opencode.db`)
 - Override with `OPENCODE_DB` env var (used by tests)
+- `/save` output dir override: `OPENCODE_TRANSCRIPT_DIR`
 - Requires Node 22+ or Bun
-## Never Check Out `master` Here (Rule)
-This directory is not just a working copy — it is the **live plugin source**
-that the user's OpenCode is executing from, configured by absolute path in
-`~/.config/opencode/opencode.json`. A `git checkout` changes production.
+- The repo is **private while in testing**. It is not published to npm, and
+  `~/.config/opencode/opencode.json` loads `opencode-session-transcript` from npm
+  — so nothing here is live until you either publish or repoint that entry at
+  this checkout by absolute path.
 
-The file watcher reloads the plugin on every save, so the moment a checkout
-lands, whatever is on disk is live. This has bitten twice:
-
-- `master` predated the namespacing fix, so checking it out registered bare
-  `read`, `archive` and `unarchive`, replacing the host's core read tool and
-  breaking every request that touched a file.
-- A mid-merge checkout flashed stale tools before the pull completed.
-
-**Rule: develop on a branch, merge on GitHub, never switch branches in this
-directory while OpenCode is running.** `master` is not a place to visit locally.
-
-If a branch must be checked out, stop OpenCode first, and verify afterwards:
+## Git Rules
+- **Never check out another branch while OpenCode is running against this
+  directory.** If this checkout is the live plugin source (configured by
+  absolute path), the file watcher reloads on every save — so the moment a
+  checkout lands, whatever is on disk is live. This has bitten twice: `master`
+  predated the namespacing fix, so checking it out registered a bare `read`,
+  replacing the host's core tool; a mid-merge checkout flashed stale tools
+  before the pull completed.
+- Develop on a branch, merge on GitHub. `master` is not a place to visit locally.
+- If a branch must be checked out, stop OpenCode first, then verify:
 
 ```bash
 curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config/opencode/service.json'))['password'])")" \
   http://127.0.0.1:49374/api/command | python3 -c "import sys,json;print([c['name'] for c in json.load(sys.stdin)['data']])"
 ```
 
-Expect exactly `['init', 'review', 'save']`. Anything else means a stale
+With the npm package loaded, expect exactly `['init', 'review', 'save']`. Any
+`list`, `archive`, `session` or `unarchive` in that output means a local
 checkout is live.
