@@ -1,14 +1,13 @@
 {
-  "name": "opencode-archive-unarchive-listarchive-savesession",
-  "version": "0.1.0",
+  "name": "opencode-archive-session",
+  "version": "0.2.0",
   "description": "OpenCode plugin to archive, list, read, save and restore sessions. Forked from opencode-session-transcript, reviving the archive tooling that was dropped there.",
   "keywords": [
     "archive",
-    "unarchive",
     "markdown",
     "opencode",
     "opencode-plugin",
-    "project",
+    "restore",
     "session",
     "transcript"
   ],
@@ -40,7 +39,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ssearles/opencode-archive-unarchive-listarchive-savesession.git"
+    "url": "git+https://github.com/ssearles/opencode-archive-session.git"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

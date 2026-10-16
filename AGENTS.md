@@ -1,4 +1,4 @@
-# AGENTS.md — opencode-archive-unarchive-listarchive-savesession
+# AGENTS.md — opencode-archive-session
 
 ## Project Overview
 OpenCode plugin to archive, list, read, save and restore sessions — including
@@ -54,10 +54,11 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 ## Commands (slash — must be typed, see the palette note below)
 | Command | Purpose |
 |---------|---------|
-| `/list` | Numbered inventory of working sessions |
-| `/archive [id…]` | Archive the current session, or named ones |
+| `/list_Current` | Numbered list of current (unarchived) sessions |
+| `/archive_Put [num \| id \| title]` | Archive a current session |
+| `/list_Archived` | Numbered list of archived sessions |
+| `/archive_Pull [num \| id \| title>` | Restore an archived session — refuses ambiguous terms |
 | `/session <id or title>` | Print a transcript (archived included) |
-| `/unarchive <n \| id \| title>` | Restore — refuses ambiguous terms |
 | `/save [path.md]` | Write the session to Markdown, default `~/Documents/<title>.md` |
 
 `/save` takes an explicit output path when the argument ends in `.md`, so
@@ -93,14 +94,14 @@ the second. **Changing the signature to a single shape breaks one of them.**
 Store-backed matching is narrowest-first: exact id, then whole phrase against
 the title, then prefix, then substring on title/directory/id. Ambiguous terms
 resolve to **nothing** rather than to several sessions — this is what stops
-`/unarchive ZZ fix verify` restoring every session containing "fix".
+`/archive_Pull ZZ fix verify` restoring every session containing "fix".
 
 ## Test Suite Structure
 | File | Tests | Covers |
 |------|-------|--------|
 | `test/db.test.ts` | 38 | Shared suite run twice (v1 + v2 schemas), discovery |
 | `test/unarchive.test.ts` | 12 | Sync resolver — the `rows` form of `__resolve` |
-| `test/menu.test.ts` | 24 | Numbered menus, prompt parsing, `/list` inventory, picking by number |
+| `test/menu.test.ts` | 24 | Numbered menus, prompt parsing, inventory rendering, picking by number |
 | `test/markdown.test.ts` | 13 | `messageText`, `slug`, `toMarkdown` |
 | `test/resolve.test.ts` | 9 | Store-backed resolver — the async form of `__resolve` |
 | `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |
@@ -154,12 +155,12 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list`, `/archive`, `/session`, `/unarchive` or `/save` in the
-palette does nothing at all.** The commands must be typed. A plugin cannot
+**clicking `/list_Current`, `/archive_Put`, `/list_Archived`, `/archive_Pull`,
+`/session` or `/save` in the palette does nothing at all.** The commands must be typed. A plugin cannot
 register into the enum.
 
-This also plausibly explains an intermittent case where `/archive 2` did
-nothing while `/archive 1` worked: if the autocomplete dropdown is still open
+This also plausibly explains an intermittent case where `/archive_Put 2` did
+nothing while `/archive_Put 1` worked: if the autocomplete dropdown is still open
 when Enter is pressed, the click path runs and matches nothing. Unverified, but
 consistent.
 
@@ -205,7 +206,7 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
   file. This took the plugin offline once; `test/namespacing.test.ts` guards it,
   and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`,
   `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced. Note the
-  command `/list` and the tool `list_sessions` differ for this reason.
+  command `/list_Current` and the tool `list_sessions` differ for this reason.
 - **Desktop app doesn't restart the background service** — closing/reopening the
   window reuses the existing `opencode-cli serve --service` process. Must run
   `opencode reload` or kill the service process to pick up config/plugin changes.
@@ -224,6 +225,10 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
   `index.ts` syntax errors went undetected until manual load testing.
 - Template literals with nested quotes: prefer concatenation (`"foo " + bar`)
   over `` `foo ${bar}` `` when the string contains both backticks and quotes.
+- **`inventory()` has no command.** `/list` was replaced by `/list_Current` and
+  `/list_Archived`. The function and its tests remain because it is still the
+  only view showing every session with a full id on one screen — wire it to a
+  command or delete it with `test/menu.test.ts`'s `/list inventory` block.
 - **Cherry-picking an ancestor commit does not work here.** `8a754f6` predates
   `master`, so replaying it onto master re-applies a diff master already
   contains and partially undid — every file conflicts add/add. Recovering
@@ -238,11 +243,12 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
    basic auth `opencode:$PW`.
 4. Confirm load: `GET /api/plugin` → `source.type == "local"`.
 5. Confirm commands: `GET /api/command` → expect
-   `list, archive, session, unarchive, save` alongside `init, review`.
+   `list_Current, archive_Put, list_Archived, archive_Pull, session, save`
+   alongside `init, review`.
 6. Confirm no shadowing: prompt a session to use the **core** `read` tool and
    check it still reads a file.
-7. Confirm function: flip `time_archived` in `session_v2` via `/archive` and
-   `/unarchive`; write a Markdown file via `/save`.
+7. Confirm function: flip `time_archived` in `session_v2` via `/archive_Put`
+   and `/archive_Pull`; write a Markdown file via `/save`.
 8. Kill the server and delete every test session — they land in the **real**
    database.
 
@@ -274,6 +280,8 @@ Test-only exports from `index.ts`: `__resolve`, `__menu`, `__pickByNumber`,
   `~/.config/opencode/opencode.json` loads `opencode-session-transcript` from npm
   — so nothing here is live until you either publish or repoint that entry at
   this checkout by absolute path.
+- Command names are mixed-case (`/archive_Put`). They are matched literally, so
+  `/archive_put` will not autocomplete — the casing is deliberate, not a typo.
 
 ## Git Rules
 - **Never check out another branch while OpenCode is running against this
@@ -292,5 +300,5 @@ curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config
 ```
 
 With the npm package loaded, expect exactly `['init', 'review', 'save']`. Any
-`list`, `archive`, `session` or `unarchive` in that output means a local
-checkout is live.
+`list_Current`, `archive_Put`, `list_Archived`, `archive_Pull` or `session` in
+that output means a local checkout is live.

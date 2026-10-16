@@ -1,156 +1,140 @@
-# opencode-session-transcript
+# opencode-archive-session
 
-A correct `/export` for OpenCode, in plugin form.
+Archive, list, read, save and restore OpenCode sessions — including sessions
+OpenCode itself can no longer bring back.
 
-> **This is a stopgap** for bugs in `/export`
-> ([#50732](https://github.com/anomalyco/opencode/issues/50732),
-> [#50014](https://github.com/anomalyco/opencode/issues/50014)) that are being
-> fixed upstream. Once those land, this should be retired in favour of a
-> correct `/export`.
+Forked from
+[`opencode-session-transcript`](https://github.com/ssearles/opencode-session-transcript),
+which had dropped archiving when it pivoted to Markdown export. That work is
+restored here, and `/save` ships alongside it rather than instead of it.
 
-## The problem
+## Why this exists
 
-OpenCode can export a session, but `/export` has three separate shortcomings:
+**Archiving is one-way.** OpenCode's API ignores `time_archived` changes, so an
+archived session cannot be restored through it. This plugin writes directly to
+SQLite, and is the only way back.
 
-**It silently truncates.** [#50732](https://github.com/anomalyco/opencode/issues/50732)
-and [#50014](https://github.com/anomalyco/opencode/issues/50014) both report
-that `/export` writes only the messages currently loaded in the TUI, not the
-full transcript. In a long session, early prompts and responses are simply
-absent — and nothing warns you, so the file looks complete. This is the worst
-possible failure mode for an export tool, because you only find out when you go
-looking for something that isn't there.
+**Export truncates.** The TUI `/export` writes only the messages currently loaded
+in the window
+([#50732](https://github.com/anomalyco/opencode/issues/50732),
+[#50014](https://github.com/anomalyco/opencode/issues/50014)) — nothing warns you,
+so the file looks complete. `/save` reads every message for the session straight
+out of SQLite.
 
-**It means different things in different clients.**
-[#48105](https://github.com/anomalyco/opencode/issues/48105) documents that
-`/export` in the TUI produces human-readable Markdown while `opencode export`
-on the CLI produces JSON for re-import. The desktop app's `/export` follows the
-JSON behaviour, so there is no Markdown export there at all.
-
-**There is no CLI equivalent that reads well.** `opencode session export` gives
-you a multi-megabyte JSON file — correct and complete, but not something you
-would ever read end to end.
-
-## What this does
-
-One command. It reads every message for the current session straight out of
-OpenCode's SQLite store and writes them to a Markdown file you can actually
-read.
-
-```
-/save
-```
-
-```
-/home/steven/Documents/archiving-older-ai-conversations.md
-
-835 messages · 234 KB
-```
-
-The output is the same conversation you'd expect to read, with tool calls kept
-inline and assistant reasoning dropped:
-
-```markdown
-# Archiving older AI conversations
-
-**Started:** 2026-10-13 11:43
-**Directory:** `/home/steven/Documents/Default Project`
-**Session id:** `ses_ec96bff81ffdMzlHLBZmD0r2Nj`
-
-### You · 11:43
-can I archive older AI conversations to free up session space...
-
-### Assistant · 11:43
-I'll check the OpenCode docs on sessions and CLI settings.
-
-**[tool]** `webfetch` — completed
-```
-
-Because it reads the database rather than the UI's loaded window, the output is
-complete regardless of how much of the thread you have scrolled.
+> **Not a backup.** `/export` writes JSON, which `opencode import` can read back.
+> `/save` writes Markdown, which cannot be re-imported, and it drops assistant
+> reasoning to do it. If you want a restorable archive, keep using `/export`.
 
 ## Install
 
-```jsonc
+```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-session-transcript"]
+  "plugins": ["opencode-archive-session"]
 }
 ```
 
 Or point at a local checkout:
 
-```jsonc
-{ "plugins": ["/absolute/path/to/opencode-session-transcript"] }
+```json
+{ "plugins": ["/absolute/path/to/opencode-archive-session"] }
 ```
 
 No dependencies are installed at runtime. The plugin uses whichever SQLite
 driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
 
-## Usage
+## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/save` | Write the current session to `~/Documents/<session title>.md` |
-| `/save ~/Desktop/today.md` | Write wherever you say |
-| `/unarchive` | List archived sessions |
-| `/unarchive <n \| id \| title>` | Restore one |
+| `/list_Current` | Numbered list of current (unarchived) sessions |
+| `/archive_Put [num \| id \| title]` | Archive a current session |
+| `/list_Archived` | Numbered list of archived sessions |
+| `/archive_Pull [num \| id \| title]` | Restore an archived session |
+| `/session <num \| id \| title>` | Print a transcript, archived included |
+| `/save [path.md]` | Write the session to Markdown |
 
-Set `OPENCODE_TRANSCRIPT_DIR` to change the default folder.
+### Numbered lists, and why the numbers are scoped
 
-Filenames come from the session's own title, read at run time. Two sessions
-sharing a title will overwrite each other — pass an explicit path to keep both.
+`/list_Current` and `/list_Archived` number their rows from 1, and
+`/archive_Put` / `/archive_Pull` resolve a bare number against the matching list:
 
-### About `/unarchive`
+```
+/list_Current        →  1. Diagnosing 2TB external drive
+                       2. Fix missing scroll bar in Okular
+/archive_Put 2       →  Archived 1 session(s).
+```
 
-This plugin started as a session-archiving tool. `/archive` and `/unarchive`
-were built to declutter the session list, then dropped when the project view —
-the 4-squares toggle in the top-left of the desktop app — turned out to cover
-that already. What remained was wanting a session *out* as readable text, which
-is what `/save` does.
+The two lists count **disjoint halves** of the database — `/archive_Put` is
+scoped to `time_archived IS NULL`, `/archive_Pull` to `IS NOT NULL`. Number 3
+means "third current session" in one and "third archived session" in the other.
+They can never collide, because the row sets do not overlap.
 
-Restoring stayed because it is the one half with no equivalent in the UI:
-OpenCode can archive a session but offers no way to undo it.
+A number is only valid against the list you were just looking at. Archiving or
+restoring something in between shifts the positions, so if a number suddenly
+refuses to match, re-run the list first.
 
-**Planned deprecation:** `/unarchive` will be removed in a future major
-version. Restoring an archived session belongs in OpenCode core, not in a
-stopgap for `/export`, and keeping it here muddies what this package is for.
-Expect it to move to a separate plugin rather than disappear.
+Passing no argument at all prints the menu rather than acting, because opening a
+command is never a request to archive the session you are currently in.
 
-There is deliberately no matching `/archive`. Archiving hides a session without
-removing it, and the project view already makes everything findable again, so
-on offer it solves nothing.
+An ambiguous term resolves to **nothing** rather than guessing: a title fragment
+matching two sessions asks you to be more specific instead of picking one. This
+matters more for `/archive_Pull`, which is a write.
 
-An ambiguous term restores nothing rather than guessing: a title fragment that
-matches two sessions will ask you to be more specific rather than pick one.
+### `/save`
+
+Output defaults to `~/Documents/<session title>.md`, named from the session's own
+title read at run time. Set `OPENCODE_TRANSCRIPT_DIR` to change the folder.
+
+```
+/save                  →  ~/Documents/archiving-older-ai-conversations.md
+/save ~/Desktop/today.md
+```
+
+Filenames come from the title, so two sessions sharing a title will overwrite
+each other — pass an explicit path to keep both.
+
+## Tools (agent-callable)
+
+Namespaced `session_archive.*`, so they cannot shadow a core tool:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_sessions` | List working sessions |
+| `list_archived` | List archived sessions, optional `search` |
+| `archive` | Archive by `session_ids[]` |
+| `read_transcript` | Read a transcript by id or search |
+| `unarchive` | Restore by `session_ids[]` |
 
 ## Safety
 
-- `/save` is **read-only**. It only reads `session_v2` and `session_message` and
-  writes one Markdown file of its own.
-- `/unarchive` **does** write, and takes a `VACUUM INTO` snapshot first, which is
-  consistent while OpenCode holds the database open in WAL mode. It only ever
-  sets `time_archived` and `time_updated` — never a message. It also keeps the
-  three most recent snapshots and prunes older ones.
+- `/save`, `/list_Current`, `/list_Archived` and `/session` are **read-only**.
+- `/archive_Put` and `/archive_Pull` **do** write, and take a `VACUUM INTO`
+  snapshot first, which is consistent while OpenCode holds the database open in
+  WAL mode. They only ever set `time_archived` and `time_updated` — never a
+  message. The three most recent snapshots are kept and older ones pruned.
 - Schema-agnostic: discovers `session_v2` (v2.x) or `session` (v1.x) and
   introspects its columns rather than hardcoding either.
+
+## Commands are type-only
+
+The desktop command palette dispatches through a fixed enum of built-in names.
+No plugin command appears in it, so **these must be typed** — clicking one in the
+palette does nothing. A missing command from the palette is not a bug in it.
 
 ## Development
 
 ```bash
-npm test          # node --test, no install required
-npm run check     # confirms both modules load
-npm run typecheck # requires typescript
+npm test          # node --test test/, no install required
+npm run check     # confirms index.ts and src/db.ts load
+npm run typecheck # requires TypeScript
 ```
 
-The test suite builds throwaway databases in **both** schemas and runs the
-shared suite against each, so v1 and v2 support is exercised rather than
-assumed.
+The test suite builds throwaway databases in **both** schemas and runs the shared
+suite against each, so v1 and v2 support are exercised rather than assumed.
 
-## Upstream
-
-Once `/export` is correct — desktop parity plus the truncation fix — this
-plugin should be retired. The goal is for `/export` to work properly, not for
-this to become infrastructure anyone depends on.
+See [AGENTS.md](AGENTS.md) for the architecture notes, the resolver contract, and
+the traps that have already cost time here.
 
 ## Licence
 

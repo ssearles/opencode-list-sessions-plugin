@@ -103,7 +103,7 @@ function describe(r: SessionRow): string {
  *
  * Matching is deliberately conservative, because this feeds destructive
  * commands. Splitting a title into words and matching each one separately
- * would mean `/unarchive my big session` also restored anything else
+ * would mean `/archive_Pull my big session` also restored anything else
  * containing "big", so instead:
  *
  *   1. an exact session id always wins
@@ -162,10 +162,10 @@ async function resolve(
 /**
  * Pull the arguments out of a command's prompt text.
  *
- * The host passes the whole submitted line, command name included, so `/archive`
- * arrives as the text `"/archive"` rather than `""`. Testing the raw text for
- * emptiness therefore never fires and the command falls through to the
- * argument path, where nothing matches. Tokens starting with `/` are the
+ * The host passes the whole submitted line, command name included, so
+ * `/archive_Put` arrives as the text `"/archive_Put"` rather than `""`. Testing
+ * the raw text for emptiness therefore never fires and the command falls through
+ * to the argument path, where nothing matches. Tokens starting with `/` are the
  * command name and are dropped, so an empty result means "no argument" however
  * the command was invoked — palette click, typed, or sent with no text.
  */
@@ -218,16 +218,21 @@ function inventoryRow(r: SessionRow): string {
 }
 
 /**
- * `/list` — the whole inventory: working sessions first, then archived.
+ * The whole inventory: working sessions first, then archived.
  *
- * This is a read-only reference rather than a numbered menu. The point is that
- * every line carries its full session id, so the user can select a row with the
- * mouse and paste it straight into `/archive`, `/unarchive` or `/session`.
+ * Not currently reachable from any command — `/list` was replaced by
+ * `/list_Current` and `/list_Archived`, which are numbered menus over one half
+ * each. Kept, and kept tested, because it is the one view that shows every
+ * session with its full id on a single screen, which is what you want when the
+ * two halves need comparing. Wire it to a command or drop it with its tests.
  *
- * Numbering is deliberately omitted: the two orderings here (`/archive` counts
- * working only, `/unarchive` counts archived only) are both subsets of this
- * list, so a single shared numbering would not match either menu. Copying an id
- * is unambiguous, where a remembered number would not be.
+ * Every line carries its full session id so a row can be selected with the mouse
+ * and pasted straight into `/archive_Put`, `/archive_Pull` or `/session`.
+ *
+ * Numbering is deliberately omitted: the two menus count different subsets
+ * (`/archive_Put` numbers current only, `/archive_Pull` numbers archived only),
+ * so a single shared numbering would match neither once either group changed
+ * size. Copying an id is unambiguous, where a remembered number would not.
  */
 function inventory(all: SessionRow[], limit = 60): string {
   if (all.length === 0) return "No sessions found."
@@ -256,7 +261,7 @@ function inventory(all: SessionRow[], limit = 60): string {
     ...sections,
     ...hidden,
     "",
-    "Copy a line's id into `/archive <id>`, `/unarchive <id>` or `/session <id>`.",
+    "Copy a line's id into `/archive_Put <id>`, `/archive_Pull <id>` or `/session <id>`.",
   ].join("\n\n")
 }
 
@@ -297,7 +302,7 @@ const REMINDER =
   "the server and emits no session update event."
 
 export default {
-  id: "opencode-archive-unarchive-listarchive-savesession",
+  id: "opencode-archive-session",
 
   async setup(ctx: PluginContext) {
     const say = (sessionID: string, text: string) =>
@@ -307,12 +312,19 @@ export default {
 
     await ctx.command.transform((editor) => {
       editor.add({
-        name: "list",
-        description: "List every session — working first, then archived — with copyable ids",
+        name: "list_Current",
+        description: "Numbered list of current (unarchived) sessions",
         execute: async ({ sessionID }) => {
           try {
             const s = await store()
-            await say(sessionID, inventory(await s.list()))
+            await say(
+              sessionID,
+              menu(await s.list({ archived: "active" }), {
+                heading: "Current sessions",
+                empty: "No current sessions.",
+                action: "Archive one with `/archive_Put <number>`, or name it directly.",
+              }),
+            )
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -320,24 +332,44 @@ export default {
       })
 
       editor.add({
-        name: "archive",
-        description: "Show open sessions to archive, or archive the one you name",
+        name: "list_Archived",
+        description: "Numbered list of archived sessions",
+        execute: async ({ sessionID }) => {
+          try {
+            const s = await store()
+            await say(
+              sessionID,
+              menu(await s.list({ archived: "only" }), {
+                heading: "Archived sessions",
+                empty: "No archived sessions.",
+                action: "Restore one with `/archive_Pull <number>`, or name it directly.",
+              }),
+            )
+          } catch (err) {
+            await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        },
+      })
+
+      editor.add({
+        name: "archive_Put",
+        description: "Archive a current session by number, id or title",
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
             const args = parseArgs(prompt?.text)
 
-            // No argument: show the open sessions as a numbered menu. This is
-            // the default rather than archiving the current session, because
+            // No argument: show the current sessions as a numbered menu. This is
+            // the default rather than archiving the session in play, because
             // that is never what someone means when they open the command list.
             if (args.length === 0) {
               const open = await s.list({ archived: "active" })
               await say(
                 sessionID,
                 menu(open, {
-                  heading: "Open sessions",
-                  empty: "No open sessions to archive.",
-                  action: "Archive one with `/archive <number>`, or name it directly.",
+                  heading: "Current sessions",
+                  empty: "No current sessions to archive.",
+                  action: "Archive one with `/archive_Put <number>`, or name it directly.",
                 }),
               )
               return
@@ -356,7 +388,7 @@ export default {
               await say(
                 sessionID,
                 `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
-                  "Run `/archive` to see the open sessions, or name one exactly.",
+                  "Run `/list_Current` to see the current sessions, or name one exactly.",
               )
               return
             }
@@ -435,7 +467,7 @@ export default {
               })
               .join("\n\n")
 
-            const footer = hit.archived ? `\n\nRestore it with \`/unarchive ${hit.id}\`.` : ""
+            const footer = hit.archived ? `\n\nRestore it with \`/archive_Pull ${hit.id}\`.` : ""
             await say(sessionID, `${head}\n\n${body}${footer}`)
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
@@ -444,8 +476,8 @@ export default {
       })
 
       editor.add({
-        name: "unarchive",
-        description: "Show archived sessions to restore, or restore the one you name",
+        name: "archive_Pull",
+        description: "Restore an archived session by number, id or title",
         execute: async ({ sessionID, prompt }) => {
           try {
             const s = await store()
@@ -458,7 +490,7 @@ export default {
                 menu(rows, {
                   heading: "Archived sessions",
                   empty: "No archived sessions.",
-                  action: "Restore one with `/unarchive <number>`, or name it directly.",
+                  action: "Restore one with `/archive_Pull <number>`, or name it directly.",
                 }),
               )
               return
@@ -480,7 +512,7 @@ export default {
               await say(
                 sessionID,
                 `Nothing matched "${args.join(" ")}", so nothing was restored. ` +
-                  "Run `/unarchive` to see the archived sessions.",
+                  "Run `/list_Archived` to see the archived sessions.",
               )
               return
             }
@@ -765,7 +797,7 @@ export { slug, toMarkdown }
 /**
  * Resolve against a caller-supplied row list, synchronously.
  *
- * This is the `/unarchive` contract from `opencode-session-transcript`, kept
+ * This is the `/archive_Pull` contract from `opencode-session-transcript`, kept
  * alongside the store-backed resolver above because both are exercised: a bare
  * number is a 1-based position in the list that was just printed, an exact id
  * always wins over a number, and a term matching several rows resolves to
