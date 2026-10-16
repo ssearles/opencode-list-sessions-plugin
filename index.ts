@@ -263,7 +263,7 @@ function inventory(all: SessionRow[], limit = 60): string {
     ...sections,
     ...hidden,
     "",
-    "Copy a line's id into `/archive_Put <id>`, `/archive_Pull <id>` or `/session <id>`.",
+    "Copy a line's id into `/archive_Put <id>` or `/archive_Pull <id>`.",
   ].join("\n\n")
 }
 

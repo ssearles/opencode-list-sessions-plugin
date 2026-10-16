@@ -21,7 +21,7 @@ ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/  (111 tests, no install required)
+npm test          # node --test test/  (115 tests, no install required)
 npm run check     # verifies index.ts and src/db.ts load without syntax errors
 npm run typecheck # tsc --noEmit (requires TypeScript installed)
 ```
@@ -103,6 +103,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/markdown.test.ts` | 13 | `messageText`, `slug`, `toMarkdown` |
 | `test/resolve.test.ts` | 9 | Store-backed resolver — the async form of `__resolve` |
 | `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |
+| `test/naming.test.ts` | 4 | User-facing text names only registered commands |
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 
@@ -195,6 +196,21 @@ d = pathlib.Path("/usr/lib/opencode-desktop/app.asar").read_bytes()
 hl = struct.unpack("<I", d[12:16])[0]
 hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
 ```
+
+## Wording Is Tested Too, Not Just Behaviour
+A footer reading "copy an id into `/archive_Put`, `/archive_Pull` or `/session`"
+survived three commits after `/session` was removed, because every other test
+asserts behaviour rather than text. It reached a working install and was caught
+by a person reading the output.
+
+`test/naming.test.ts` now reads index.ts, strips comments, and asserts every
+backticked `/name` in user-facing text is a registered command. Comments are
+excluded deliberately — they discuss removed commands and explain why, which is
+history worth keeping but is not text a user reads.
+
+Watch for the trap it walks into: `archive` and `unarchive` are removed
+*commands* but live *tools* under `session_archive`. Separate registries, so
+their presence says nothing about the command of the same name.
 
 ## Command Output Goes to Two Channels
 Every command writes to `~/.local/share/opencode/session-log/<timestamp>.md`
@@ -292,6 +308,7 @@ test/menu.test.ts         # menus, parsing, inventory, pickByNumber
 test/markdown.test.ts     # Markdown rendering
 test/resolve.test.ts      # store-backed resolver (__resolve with args only)
 test/namespacing.test.ts  # Guards tool namespacing / core-tool collisions
+test/naming.test.ts       # Text must not name a command that no longer exists
 test/range.test.ts        # Out-of-range numbers refused, not reinterpreted
 test/retention.test.ts    # Bounded backups
 probe.ts                  # Headless driver — run commands, capture to a file
