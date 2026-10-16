@@ -832,6 +832,11 @@ function resolveRows(
  * Callers that `await` the result work with either form, since awaiting a plain
  * value is a no-op — which is what lets both test suites share one export.
  */
+export function __resolve(args: string[]): Promise<{ ids: string[]; ambiguous: boolean }>
+export function __resolve(
+  args: string[],
+  rows: SessionRow[],
+): { ids: string[]; ambiguous: boolean }
 export function __resolve(
   args: string[],
   rows?: SessionRow[],

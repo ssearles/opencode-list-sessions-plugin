@@ -153,7 +153,9 @@ function layoutSuite(name: string, schema: string, table: string, msgs: string) 
       const s = await open()
       const { backup } = await s.archive(["ses_a"])
       const check = new DatabaseSync(backup!, { readOnly: true })
-      const row = check.prepare(`SELECT time_archived FROM ${table} WHERE id='ses_a'`).get()
+      const row = check.prepare(`SELECT time_archived FROM ${table} WHERE id='ses_a'`).get() as {
+        time_archived: number | null
+      }
       check.close()
       assert.equal(row.time_archived, null, "backup must capture pre-write state")
     })
