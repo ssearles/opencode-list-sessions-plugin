@@ -20,7 +20,7 @@ import { join } from "node:path"
 import { after, before, describe, it } from "node:test"
 
 import { SessionStore } from "../src/db.ts"
-import { __menu, __pickByNumber, __inventory, __parseArgs } from "../index.ts"
+import { __menu, __pickByNumber, __inventory, __parseArgs, __stripAnsi as stripAnsi } from "../index.ts"
 import type { SessionRow } from "../src/db.ts"
 
 const SCHEMA = `
@@ -73,7 +73,9 @@ describe("numbered menus", () => {
       action: "pick one",
     })
 
-    const lines = out.split("\n").filter((l) => /^\d+\./.test(l))
+    // Rows carry ANSI colour around the number, so match on the stripped text.
+    const plain = stripAnsi(out)
+    const lines = plain.split("\n").filter((l) => /^\d+\./.test(l))
     assert.equal(lines.length, 4)
     assert.match(lines[0], /^1\. /)
     assert.match(lines[3], /^4\. /)
@@ -92,7 +94,10 @@ describe("numbered menus", () => {
     const all = await rows()
     const out = __menu(all, { heading: "x", empty: "none", action: "y", limit: 2 })
     assert.match(out, /…and 2 more/)
-    assert.equal(out.split("\n").filter((l) => /^\d+\./.test(l)).length, 2)
+    assert.equal(
+      stripAnsi(out).split("\n").filter((l) => /^\d+\./.test(l)).length,
+      2,
+    )
   })
 })
 
@@ -134,7 +139,9 @@ describe("prompt text parsing", () => {
 describe("/list inventory", () => {
   it("puts working sessions before archived ones", async () => {
     const out = __inventory(await rows())
-    const workingAt = out.indexOf("**Working**")
+    // The state lives in the section heading now, so match the heading prefix
+    // rather than the old "**Working**" exactly.
+    const workingAt = out.indexOf("**Working")
     const archivedAt = out.indexOf("**Archived**")
 
     assert.ok(workingAt !== -1, "missing a Working section")
@@ -149,15 +156,24 @@ describe("/list inventory", () => {
     }
   })
 
-  it("marks which sessions are archived", async () => {
+  it("puts each session under the heading for its state", async () => {
+    // Rows no longer repeat "working"/"archived" — a row is only ever in one
+    // section, so repeating it on every line was noise. What matters is that a
+    // session appears under the right heading.
     const out = __inventory(await rows())
-    assert.match(out, /working\s+/)
-    assert.match(out, /archived\s+/)
+    const [working, archived] = out.split("**Archived**")
+
+    for (const title of ["Alpha work", "Beta work"]) {
+      assert.ok(working.includes(title), `${title} must be in the Working section`)
+    }
+    for (const title of ["Gamma work", "Delta work"]) {
+      assert.ok(archived.includes(title), `${title} must be in the Archived section`)
+    }
   })
 
   it("counts each section", async () => {
     const out = __inventory(await rows())
-    assert.match(out, /\*\*Working\*\* \(2\)/)
+    assert.match(out, /\*\*Working[^\n]*\*\* \(2\)/)
     assert.match(out, /\*\*Archived\*\* \(2\)/)
   })
 

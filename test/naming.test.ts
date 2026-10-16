@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { describe, it } from "node:test"
 
+import { __emphasizeNumbers as emphasizeNumbers, __stripAnsi as stripAnsi } from "../index.ts"
+
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, "..", "index.ts"), "utf8")
 
@@ -101,5 +103,37 @@ describe("command names in text", () => {
     for (const name of REGISTERED) {
       assert.notEqual(name, "list", "/list collides with the core list tool name")
     }
+  })
+})
+
+describe("menu numbers are emphasised for the terminal", () => {
+  it("bolds and colours the leading number of each row", () => {
+    const out = emphasizeNumbers("**Current sessions**\n\n1. one\n2. two")
+    assert.match(out, /\u001b\[1;36m1\.\u001b\[0m one/)
+    assert.match(out, /\u001b\[1;36m2\.\u001b\[0m two/)
+  })
+
+  it("leaves numbers that are not row numbers alone", () => {
+    // A session id, message count or timestamp must not be recoloured — only a
+    // bare "N." at the start of a line is a row number.
+    const out = emphasizeNumbers("ses_123  42 msg  2026-10-16  title")
+    assert.equal(out, "ses_123  42 msg  2026-10-16  title")
+    assert.ok(!out.includes("\u001b["))
+  })
+
+  it("does not touch a decimal number mid-row", () => {
+    const out = emphasizeNumbers("  3. row with 1.5 in the title")
+    assert.equal(out.match(/\u001b\[1;36m/g)?.length, 1, "only the row number is emphasised")
+  })
+
+  it("strips the codes again for the Markdown channel", () => {
+    const coloured = emphasizeNumbers("1. one\n2. two")
+    assert.notEqual(coloured, "1. one\n2. two", "input was actually coloured")
+    assert.equal(stripAnsi(coloured), "1. one\n2. two")
+  })
+
+  it("round-trips: stripping restores the exact original", () => {
+    const original = "**Heading**\n\n1. ses_a  10 msg  now  Title\n2. ses_b  20 msg  now  Other"
+    assert.equal(stripAnsi(emphasizeNumbers(original)), original)
   })
 })

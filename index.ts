@@ -93,9 +93,27 @@ function when(ms: number | null): string {
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ")
 }
 
+/**
+ * One menu row: the title first, then the detail needed to tell two similarly
+ * named sessions apart.
+ *
+ * This used to lead with the short id, message count and timestamp, which put
+ * the title at the far right where it wrapped off screen — so the one field that
+ * identifies a session was the hardest to read. Title leads now; the id and
+ * counts follow on the same line and are safe to lose off the edge.
+ */
 function describe(r: SessionRow): string {
   const msgs = r.messages === null ? "?" : r.messages
-  return `${shortId(r.id)}  ${String(msgs).padStart(4)} msg  ${when(r.updated)}  ${r.title}`
+  const dir = r.directory ? shortDir(r.directory) : ""
+  const bits = [`${shortId(r.id)}`, `${msgs} msg`, when(r.updated)]
+  if (dir) bits.push(dir)
+  return `${r.title}  —  ${bits.join(" · ")}`
+}
+
+/** Last one or two path segments, enough to tell projects apart. */
+function shortDir(dir: string): string {
+  const parts = dir.split("/").filter(Boolean)
+  return parts.slice(-2).join("/")
 }
 
 /**
@@ -188,6 +206,42 @@ function parseArgs(text: string | undefined): string[] {
  * digit instead of a title fragment, and the numbering is stable for the list
  * just printed.
  */
+/**
+ * ANSI attributes for the row numbers in a menu.
+ *
+ * The number is the one token the user has to type back, so it is the one thing
+ * worth making unmissable — bold and cyan against the plain rows around it.
+ *
+ * These go in the *file* channel. The synthetic message strips them again
+ * ({@link stripAnsi}), because that channel is rendered as Markdown by the
+ * client, where a raw escape sequence is noise. Deriving the app copy by
+ * stripping the file copy keeps a single source of truth, so the two cannot
+ * drift into describing different reports.
+ */
+const NUM = "\u001b[1;36m" // bold cyan
+const OFF = "\u001b[0m"
+
+/** Matches CSI sequences, so they can be removed before the Markdown channel. */
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;]*m/g
+
+/** Remove ANSI colour codes, leaving the plain text beneath. */
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "")
+}
+
+/**
+ * Bold-cyan the leading `N.` of every menu row.
+ *
+ * Only touches a number at the start of a line, so a session id, a timestamp or
+ * a message count elsewhere in the row is left alone.
+ */
+function emphasizeNumbers(text: string): string {
+  return text.replace(/^(\s*)(\d+\.)/gm, (_m, space: string, num: string) =>
+    space + NUM + num + OFF,
+  )
+}
+
 function menu(
   rows: SessionRow[],
   opts: { heading: string; empty: string; action: string; limit?: number },
@@ -198,23 +252,36 @@ function menu(
   const shown = rows.slice(0, limit)
   const width = String(shown.length).length
 
-  return [
+  return emphasizeNumbers([
     `**${opts.heading}**`,
     "",
-    ...shown.map((r, i) => `${String(i + 1).padStart(width)}. ${describe(r)}`),
+    ...shown.map((r, i) => `${String(i + 1).padStart(width)}. ${describe(r)}`.replace(/\n/g, " ")),
     ...(rows.length > shown.length
       ? ["", `…and ${rows.length - shown.length} more. Narrow by title instead.`]
       : []),
     "",
     opts.action,
-  ].join("\n")
+  ].join("\n"))
 }
 
-/** One line per session, with the full id so it can be selected and copied. */
+/**
+ * One entry per session: title on its own line, id and detail beneath.
+ *
+ * This used to lead with the state, message count and timestamp, which pushed
+ * the title to the far right where it wrapped — and it put the id on an indented
+ * continuation line that was easy to misread as belonging to the row above. The
+ * title leads, because it is what you scan for; the id is last on its own line
+ * where it can be selected and copied whole.
+ *
+ * The state is carried by the section heading (Working / Archived) rather than
+ * repeated on every row, since a row is only ever in one section.
+ */
 function inventoryRow(r: SessionRow): string {
-  const msgs = r.messages === null ? "?" : String(r.messages).padStart(4)
-  const state = r.archived ? "archived" : "working"
-  return `${state.padEnd(8)} ${msgs} msg  ${when(r.updated)}  ${r.title}\n              ${r.id}`
+  const msgs = r.messages === null ? "?" : r.messages
+  const dir = r.directory ? shortDir(r.directory) : ""
+  const bits = [`${msgs} msg`, when(r.updated)]
+  if (dir) bits.push(dir)
+  return `  ${r.title}\n      ${r.id}  ·  ${bits.join(" · ")}`
 }
 
 /**
@@ -254,7 +321,7 @@ function inventory(all: SessionRow[], limit = 60): string {
   }
 
   const sections: string[] = []
-  if (working.length) sections.push(block("Working", working).join("\n"))
+  if (working.length) sections.push(block("Working — current", working).join("\n"))
   if (archived.length) sections.push(block("Archived", archived).join("\n"))
 
   const hidden = all.length > limit * 2 ? ["", "Some sessions were omitted."] : []
@@ -451,7 +518,9 @@ export default {
         // A read-only or missing directory must not stop the command working.
       }
       try {
-        await ctx.session.synthetic({ sessionID, text })
+        // Stripped: this channel is rendered as Markdown, where a raw escape
+        // sequence would be shown literally.
+        await ctx.session.synthetic({ sessionID, text: stripAnsi(text) })
       } catch {
         // The file is the fallback; losing the inline copy is survivable.
       }
@@ -945,6 +1014,8 @@ export function __resolve(
 }
 /** Exposed for tests: numbered-menu selection and rendering. */
 export const __menu = menu
+export const __stripAnsi = stripAnsi
+export const __emphasizeNumbers = emphasizeNumbers
 export const __pickByNumber = pickByNumber
 export const __inventory = inventory
 /** Exposed for tests: prompt-text argument parsing. */
