@@ -21,7 +21,7 @@ ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/  (115 tests, no install required)
+npm test          # node --test test/  (122 tests, no install required)
 npm run check     # verifies index.ts and src/db.ts load without syntax errors
 npm run typecheck # tsc --noEmit (requires TypeScript installed)
 ```
@@ -105,6 +105,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |
 | `test/naming.test.ts` | 4 | User-facing text names only registered commands |
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
+| `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 
 Fixtures: each test file builds its own throwaway DB in a temp dir via the
@@ -231,8 +232,18 @@ control is worth not depending on. But it is insurance, not the primary path,
 and should not be documented as though the primary path were broken.
 
 Written first and synchronously, so if the synthetic call throws the output is
-already on disk. `latest.md` is rewritten each run so `tail -f` has one stable
-path to follow — a glob expands once at start and would never see later files.
+already on disk.
+
+`latest.md` is **appended**, keeping the 20 most recent reports, and watched
+with `tail -n +1 -F`. It was originally rewritten from scratch each run, which
+showed the current report but left a follower nothing to scroll — the file was
+always one report long, so the pane redrew in place. Two bugs in the trim are
+worth not reintroducing: trimming to the cap and *then* appending leaves cap + 1,
+and splitting on the report marker leaves an empty leading chunk that consumes a
+slot if you filter after slicing rather than before.
+
+`-n +1` matters as much as `-F`: plain `tail -f` prints only the last ten lines,
+which on a 14-line report hides the header.
 
 `/session` was removed because `/list_sessions` covers it. The `readMessages`
 DB method stays — the `read_transcript` tool uses it.
@@ -322,6 +333,7 @@ test/resolve.test.ts      # store-backed resolver (__resolve with args only)
 test/namespacing.test.ts  # Guards tool namespacing / core-tool collisions
 test/naming.test.ts       # Text must not name a command that no longer exists
 test/range.test.ts        # Out-of-range numbers refused, not reinterpreted
+test/sessionlog.test.ts   # The running output log appends and trims
 test/retention.test.ts    # Bounded backups
 probe.ts                  # Headless driver — run commands, capture to a file
 package.json           # main: "./index.ts", exports: ".": "./index.ts"

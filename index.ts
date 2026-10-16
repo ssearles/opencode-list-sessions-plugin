@@ -13,7 +13,7 @@
 
 import { ArchiveError, SessionStore, type SessionRow } from "./src/db.ts"
 import { slug, toMarkdown } from "./src/markdown.ts"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -367,18 +367,62 @@ function stamp(): string {
 }
 
 /**
- * A stable name for the most recent output, so `tail -f` has one path to follow.
+ * A stable path for the live output, so a follower has one file to watch.
  *
- * The timestamped files are the history; this is the live view. `tail -f` on the
- * directory does not work, and `tail -f *.md` expands once at start and so never
- * picks up a file created later — which is every run after the first. A fixed
- * name sidesteps both, and is what makes `tail -f session-log/latest.md` viable
- * in a second workspace.
+ * The timestamped files are the per-run history; this is the running log.
+ * `tail -f` on the directory does not work, and `tail -f *.md` expands once at
+ * start so it never picks up a file created later — which is every run after the
+ * first. A fixed name sidesteps both.
  *
- * Truncated and rewritten rather than appended, so the pane shows the current
- * report rather than an ever-growing transcript.
+ * Watch it with `tail -n +1 -F`, not plain `tail -f`: `-n +1` prints from line
+ * one so a whole report is visible rather than just its last ten lines, and
+ * capital `-F` keeps following across the truncate-and-rewrite below.
+ *
+ * **Appended, then trimmed — not rewritten.** Rewriting showed the current
+ * report but left a follower nothing to scroll: the file was always exactly one
+ * report long, so it redrew in place with no history. Appending gives the pane
+ * something to scroll through, and {@link KEEP_REPORTS} bounds the growth.
  */
 const LATEST = "latest.md"
+
+/** How many reports {@link LATEST} keeps before dropping the oldest. */
+const KEEP_REPORTS = 20
+
+/** Reports are separated by a marker so a follower can see where one ends. */
+const REPORT_MARK = "<!-- opencode-archive-session report -->"
+
+/**
+ * Append one report to the running log, keeping only the most recent few.
+ *
+ * Split on the marker rather than counting lines, because a report's length
+ * varies with the number of sessions — a line count would cut mid-report.
+ */
+function appendReport(body: string): void {
+  const file = join(logDir(), LATEST)
+
+  let existing = ""
+  try {
+    existing = readFileSync(file, "utf8")
+  } catch {
+    // No file yet, or unreadable — start from nothing.
+  }
+
+  // Push first, then trim — not trim then push. Trimming to KEEP_REPORTS and
+  // then appending the new report leaves KEEP_REPORTS + 1, so the cap never
+  // holds. Filtering happens before slicing because splitting on the marker
+  // leaves an empty leading chunk that would otherwise consume a slot.
+  const kept = (existing.split(REPORT_MARK) as string[])
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0)
+
+  const reports = [...kept, body.trim()].slice(-KEEP_REPORTS)
+
+  // Write via a temp file and rename, so a reader tailing this path never
+  // observes a half-written report.
+  const tmp = file + ".tmp"
+  writeFileSync(tmp, reports.map((r) => REPORT_MARK + "\n" + r).join("\n\n") + "\n", "utf8")
+  renameSync(tmp, file)
+}
 
 export default {
   id: "opencode-archive-session",
@@ -399,7 +443,7 @@ export default {
         mkdirSync(logDir(), { recursive: true })
         writeFileSync(join(logDir(), stamp() + ".md"), body, "utf8")
         // Stable path for `tail -f`. Rewritten, not appended.
-        writeFileSync(join(logDir(), LATEST), body, "utf8")
+        appendReport(body)
       } catch {
         // A read-only or missing directory must not stop the command working.
       }

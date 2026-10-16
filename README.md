@@ -117,12 +117,15 @@ doesn't. Both receive identical text. To watch output live in a second
 terminal:
 
 ```sh
-tail -f ~/.local/share/opencode/session-log/latest.md
+tail -n +1 -F ~/.local/share/opencode/session-log/latest.md
 ```
 
-`latest.md` is rewritten on every run, so the pane always shows the current
-report; the timestamped files beside it are the history. Override the directory
-with `OPENCODE_SESSION_LOG_DIR`.
+`-n +1` prints from the first line, so you see a whole report rather than just
+its last ten. `-F` (capital) keeps following across the rewrite.
+
+`latest.md` is a running log of the last 20 reports, so the pane scrolls as
+commands run. The timestamped files beside it are the unbounded per-run history.
+Override the directory with `OPENCODE_SESSION_LOG_DIR`.
 
 ## Tools (agent-callable)
 
