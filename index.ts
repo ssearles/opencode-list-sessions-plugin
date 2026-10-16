@@ -313,14 +313,15 @@ const REMINDER =
  * Where command output is mirrored to disk, and the name of the file for one run.
  *
  * A synthetic message is the only channel a plugin has for showing text in the
- * session, and the desktop app does not reliably render one. So a command can
- * appear to do nothing at all — which is indistinguishable from a command that
- * did nothing. That is an unacceptable ambiguity for a command that archived
- * three sessions.
+ * session. It normally renders — verified against v2.0.24 on the desktop app for
+ * every command here — but it is a channel this plugin does not control, and
+ * there was a build where it silently rendered nothing at all.
  *
- * So every command writes the same text here as well. The file is the reliable
- * channel; the synthetic message is the convenient one. Both get the same
- * string, so neither can drift from the other.
+ * So every command writes the same text here as well. The file is the floor, not
+ * the primary: cheap insurance that a successful command can never be mistaken
+ * for one that did nothing, which is the unacceptable ambiguity for a command
+ * that archived three sessions. Both channels get the same string, so neither
+ * can drift from the other.
  *
  * Override with OPENCODE_SESSION_LOG_DIR. One file per run, timestamped, because
  * successive runs must not overwrite each other.

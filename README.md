@@ -112,10 +112,16 @@ each other — pass an explicit path to keep both.
 Commands report on two channels: a synthetic message in the session, and a file
 under `~/.local/share/opencode/session-log/`, one per run, timestamped.
 
-The file exists because the desktop app does not reliably render synthetic
-messages, which makes a successful command indistinguishable from a no-op — a
-bad ambiguity for a command that just archived three sessions. **If a command
-seems to do nothing, check the session-log directory.** Override the location
+Output normally appears in the session, and the file is a backup for when it
+doesn't. Both receive identical text. To watch output live in a second
+terminal:
+
+```sh
+tail -f ~/.local/share/opencode/session-log/latest.md
+```
+
+`latest.md` is rewritten on every run, so the pane always shows the current
+report; the timestamped files beside it are the history. Override the directory
 with `OPENCODE_SESSION_LOG_DIR`.
 
 ## Tools (agent-callable)

@@ -216,11 +216,23 @@ their presence says nothing about the command of the same name.
 Every command writes to `~/.local/share/opencode/session-log/<timestamp>.md`
 **and** posts a synthetic message. Override with `OPENCODE_SESSION_LOG_DIR`.
 
-The file is not belt-and-braces, it is the load-bearing channel: the desktop app
-does not reliably render synthetic messages, so a command can appear to do
-nothing at all — indistinguishable from one that did nothing, which is the worst
-ambiguity for a command that archived three sessions. The file is written first
-and synchronously; if the synthetic call throws, the output is already on disk.
+**Corrected 2026-10-16.** This file previously claimed the desktop app "does not
+reliably render synthetic messages", and treated the file as the load-bearing
+channel. That was wrong, and it was wrong by repetition rather than evidence —
+the claim came from an older note and got copied into the source comment, the
+README and here without anyone re-testing it.
+
+Tested on v2.0.24 against the desktop app: **every command rendered on screen**,
+including both writes. `/list_sessions`, `/archive_Put` bare, `/archive_Put 3`
+and `/archive_Pull 1` all displayed. So synthetic output is the normal case.
+
+The file stays, because it is nearly free and a channel this plugin does not
+control is worth not depending on. But it is insurance, not the primary path,
+and should not be documented as though the primary path were broken.
+
+Written first and synchronously, so if the synthetic call throws the output is
+already on disk. `latest.md` is rewritten each run so `tail -f` has one stable
+path to follow — a glob expands once at start and would never see later files.
 
 `/session` was removed because `/list_sessions` covers it. The `readMessages`
 DB method stays — the `read_transcript` tool uses it.
