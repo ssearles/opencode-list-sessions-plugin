@@ -365,6 +365,20 @@ function stamp(): string {
   return new Date().toISOString().slice(0, 19).replace(/:/g, "-")
 }
 
+/**
+ * A stable name for the most recent output, so `tail -f` has one path to follow.
+ *
+ * The timestamped files are the history; this is the live view. `tail -f` on the
+ * directory does not work, and `tail -f *.md` expands once at start and so never
+ * picks up a file created later — which is every run after the first. A fixed
+ * name sidesteps both, and is what makes `tail -f session-log/latest.md` viable
+ * in a second workspace.
+ *
+ * Truncated and rewritten rather than appended, so the pane shows the current
+ * report rather than an ever-growing transcript.
+ */
+const LATEST = "latest.md"
+
 export default {
   id: "opencode-archive-session",
 
@@ -379,10 +393,12 @@ export default {
      * failing with nothing to show.
      */
     const say = async (sessionID: string, text: string) => {
-      const file = join(logDir(), stamp() + ".md")
+      const body = text + "\n"
       try {
         mkdirSync(logDir(), { recursive: true })
-        writeFileSync(file, text + "\n", "utf8")
+        writeFileSync(join(logDir(), stamp() + ".md"), body, "utf8")
+        // Stable path for `tail -f`. Rewritten, not appended.
+        writeFileSync(join(logDir(), LATEST), body, "utf8")
       } catch {
         // A read-only or missing directory must not stop the command working.
       }
@@ -391,7 +407,6 @@ export default {
       } catch {
         // The file is the fallback; losing the inline copy is survivable.
       }
-      return file
     }
 
     // ---- commands (appear in the TUI and desktop command palettes) ----
