@@ -278,37 +278,121 @@ async function pickByNumber(
   args: string[],
   rows: SessionRow[],
   s: SessionStore,
-): Promise<{ ids: string[]; ambiguous: boolean }> {
+): Promise<{ ids: string[]; ambiguous: boolean; outOfRange: string[] }> {
   const numeric = args.filter((a) => /^\d+$/.test(a))
-  if (numeric.length !== args.length) return resolve(args)
+  if (numeric.length !== args.length) return { ...(await resolve(args)), outOfRange: [] }
 
   const ids: string[] = []
+  const outOfRange: string[] = []
   let ambiguous = false
 
   for (const a of numeric) {
     const n = Number(a)
     if (n >= 1 && n <= rows.length) ids.push(rows[n - 1].id)
     else {
-      // Fall back to a normal lookup for out-of-range values.
-      const viaText = await resolve([a])
-      ids.push(...viaText.ids)
-      ambiguous ||= viaText.ambiguous
+      // Out of range: stop. Do NOT fall back to a text lookup.
+      //
+      // A number is a position in the menu the user was just shown, and nothing
+      // else. Falling through to a title/id search meant `/archive_Put 99` could
+      // archive a session whose title merely contained "99", while the user
+      // believed they had picked a row that does not exist. On a write command
+      // that is the worst way to be wrong, so an unmatchable number resolves to
+      // nothing and the caller explains the range.
+      outOfRange.push(a)
     }
   }
 
-  return { ids: [...new Set(ids)], ambiguous }
+  return { ids: [...new Set(ids)], ambiguous, outOfRange }
 }
 
 const REMINDER =
   "\n\nReloading OpenCode will pick this up, because the write happens outside " +
   "the server and emits no session update event."
 
+/**
+ * Where command output is mirrored to disk, and the name of the file for one run.
+ *
+ * A synthetic message is the only channel a plugin has for showing text in the
+ * session, and the desktop app does not reliably render one. So a command can
+ * appear to do nothing at all — which is indistinguishable from a command that
+ * did nothing. That is an unacceptable ambiguity for a command that archived
+ * three sessions.
+ *
+ * So every command writes the same text here as well. The file is the reliable
+ * channel; the synthetic message is the convenient one. Both get the same
+ * string, so neither can drift from the other.
+ *
+ * Override with OPENCODE_SESSION_LOG_DIR. One file per run, timestamped, because
+ * successive runs must not overwrite each other.
+ */
+function logDir(): string {
+  const custom = process.env.OPENCODE_SESSION_LOG_DIR
+  if (custom) return custom
+  return join(homedir(), ".local", "share", "opencode", "session-log")
+}
+
+/**
+ * Explain a number that is not a row in the menu.
+ *
+ * A number is a position in the list the user was just shown and nothing else,
+ * so an out-of-range one has to be refused rather than reinterpreted. The
+ * message names the valid range because the most likely cause is a stale menu:
+ * archiving or restoring something in between shifts every position after it.
+ */
+function rangeMessage(
+  bad: string[],
+  total: number,
+  verb: string,
+  command: string,
+): string {
+  return [
+    `Nothing ${verb}. ${bad.length === 1 ? "That number is" : "Those numbers are"} not in the menu: ` +
+      bad.map((b) => `\`${b}\``).join(", ") + ".",
+    "",
+    total === 0
+      ? `There are no rows to pick — the list is empty. Run \`${command}\` with no argument to see it.`
+      : `Valid numbers are 1 to ${total}. Run \`${command}\` with no argument to see the current menu, ` +
+        "then use a number from that.",
+    "",
+    "Positions shift as sessions are archived and restored, so a number that " +
+      "worked a moment ago may no longer be in range. Naming a session by id " +
+      "always works.",
+  ].join("\n")
+}
+
+/** `2026-10-16T22-31-29` — filename-safe, sorts chronologically. */
+function stamp(): string {
+  return new Date().toISOString().slice(0, 19).replace(/:/g, "-")
+}
+
 export default {
   id: "opencode-archive-session",
 
   async setup(ctx: PluginContext) {
-    const say = (sessionID: string, text: string) =>
-      ctx.session.synthetic({ sessionID, text })
+    /**
+     * Report command output on both channels: a file that is always readable,
+     * and a synthetic message that is convenient when the client renders it.
+     *
+     * The file is written first and synchronously. If the synthetic message
+     * throws — and it can, since the desktop app's handling of them is
+     * unreliable — the command has still left its output on disk rather than
+     * failing with nothing to show.
+     */
+    const say = async (sessionID: string, text: string) => {
+      const file = join(logDir(), stamp() + ".md")
+      try {
+        mkdirSync(logDir(), { recursive: true })
+        writeFileSync(file, text + "\n", "utf8")
+      } catch {
+        // A read-only or missing directory must not stop the command working.
+      }
+      try {
+        await ctx.session.synthetic({ sessionID, text })
+      } catch {
+        // The file is the fallback; losing the inline copy is survivable.
+      }
+      return file
+    }
 
     // ---- commands (appear in the TUI and desktop command palettes) ----
 
@@ -350,8 +434,15 @@ export default {
               return
             }
             const open = await s.list({ archived: "active" })
-            const { ids, ambiguous } = await pickByNumber(args, open, s)
+            const { ids, ambiguous, outOfRange } = await pickByNumber(args, open, s)
 
+            if (outOfRange.length > 0) {
+              await say(
+                sessionID,
+                rangeMessage(outOfRange, open.length, "archived", "/archive_Put"),
+              )
+              return
+            }
             if (ambiguous) {
               await say(
                 sessionID,
@@ -381,74 +472,6 @@ export default {
         },
       })
 
-      editor.add({
-        name: "session",
-        description: "Show a session transcript by number, id or title",
-        execute: async ({ sessionID, prompt }) => {
-          try {
-            const s = await store()
-            const args = parseArgs(prompt?.text)
-            if (args.length === 0) {
-              await say(
-                sessionID,
-                menu(await s.list(), {
-                  heading: "All sessions",
-                  empty: "No sessions found.",
-                  action: "Show one with `/session <number>`, or name it directly.",
-                }),
-              )
-              return
-            }
-            const { ids, ambiguous } = await pickByNumber(args, await s.list(), s)
-            if (ambiguous) {
-              await say(
-                sessionID,
-                `"${args.join(" ")}" matched more than one session. ` +
-                  "Name one by number from `/session`, or use a more specific phrase.",
-              )
-              return
-            }
-
-            const hit = ids.length === 1 ? await s.get(ids[0]) : undefined
-            if (!hit) {
-              await say(
-                sessionID,
-                `No single session matched "${args.join(" ")}". ` +
-                  `Run \`/session\` to see them, or name one exactly.`,
-              )
-              return
-            }
-
-            const msgs = await s.readMessages(hit.id, { limit: 40 })
-            const head =
-              `**${hit.title}**\n` +
-              `${hit.id} · ${hit.directory || "(no directory)"} · ` +
-              `${hit.messages ?? msgs.length} messages · ` +
-              `${when(hit.created)} → ${when(hit.updated)}` +
-              (hit.archived ? " · **archived**" : "")
-
-            if (msgs.length === 0) {
-              await say(sessionID, `${head}\n\n(no readable messages)`)
-              return
-            }
-
-            const body = msgs
-              .map((m) => {
-                const who =
-                  m.type === "user" ? "**You**" : m.type === "synthetic" ? "**Note**" : "**Assistant**"
-                const text =
-                  m.text.length > 900 ? `${m.text.slice(0, 900)}\n…[truncated]` : m.text
-                return `${who} (#${m.seq})\n${text}`
-              })
-              .join("\n\n")
-
-            const footer = hit.archived ? `\n\nRestore it with \`/archive_Pull ${hit.id}\`.` : ""
-            await say(sessionID, `${head}\n\n${body}${footer}`)
-          } catch (err) {
-            await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        },
-      })
 
       editor.add({
         name: "archive_Pull",
@@ -470,7 +493,14 @@ export default {
               )
               return
             }
-            const { ids, ambiguous } = await pickByNumber(args, rows, s)
+            const { ids, ambiguous, outOfRange } = await pickByNumber(args, rows, s)
+            if (outOfRange.length > 0) {
+              await say(
+                sessionID,
+                rangeMessage(outOfRange, rows.length, "restored", "/archive_Pull"),
+              )
+              return
+            }
             if (ambiguous) {
               await say(
                 sessionID,

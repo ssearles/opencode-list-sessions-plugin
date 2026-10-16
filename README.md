@@ -50,7 +50,6 @@ driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
 | `/list_sessions` | List every session — working first, then archived |
 | `/archive_Put [num \| id \| title]` | Archive a current session |
 | `/archive_Pull [num \| id \| title]` | Restore an archived session |
-| `/session <num \| id \| title>` | Print a transcript, archived included |
 | `/save [path.md]` | Write the session to Markdown |
 
 ### Numbered menus, and why `/list_sessions` has no numbers
@@ -82,8 +81,11 @@ That is exactly why `/list_sessions` carries no numbers: a single shared
 numbering would match neither menu once either group changed size.
 
 A number is only valid against the menu you were just shown. Archiving or
-restoring something in between shifts the positions, so if a number suddenly
-refuses to match, re-run the command with no argument first.
+restoring something in between shifts the positions, so a number that worked a
+moment ago can fall out of range. An out-of-range number is **refused, never
+reinterpreted** — `/archive_Put 99` does not fall through to a title search, so
+it can never archive a session whose title merely contains "99". Re-run the
+command with no argument to see the current menu.
 
 Passing no argument prints the menu rather than acting, because opening a command
 is never a request to archive the session you are currently in.
@@ -105,6 +107,17 @@ title read at run time. Set `OPENCODE_TRANSCRIPT_DIR` to change the folder.
 Filenames come from the title, so two sessions sharing a title will overwrite
 each other — pass an explicit path to keep both.
 
+## Where the output goes
+
+Commands report on two channels: a synthetic message in the session, and a file
+under `~/.local/share/opencode/session-log/`, one per run, timestamped.
+
+The file exists because the desktop app does not reliably render synthetic
+messages, which makes a successful command indistinguishable from a no-op — a
+bad ambiguity for a command that just archived three sessions. **If a command
+seems to do nothing, check the session-log directory.** Override the location
+with `OPENCODE_SESSION_LOG_DIR`.
+
 ## Tools (agent-callable)
 
 Namespaced `session_archive.*`, so they cannot shadow a core tool:
@@ -119,7 +132,7 @@ Namespaced `session_archive.*`, so they cannot shadow a core tool:
 
 ## Safety
 
-- `/save`, `/list_sessions` and `/session` are **read-only**.
+- `/save` and `/list_sessions` are **read-only**.
 - `/archive_Put` and `/archive_Pull` **do** write, and take a `VACUUM INTO`
   snapshot first, which is consistent while OpenCode holds the database open in
   WAL mode. They only ever set `time_archived` and `time_updated` — never a

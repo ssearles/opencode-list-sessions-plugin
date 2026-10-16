@@ -21,7 +21,7 @@ ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/  (105 tests, no install required)
+npm test          # node --test test/  (111 tests, no install required)
 npm run check     # verifies index.ts and src/db.ts load without syntax errors
 npm run typecheck # tsc --noEmit (requires TypeScript installed)
 ```
@@ -57,7 +57,6 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 | `/list_sessions` | Every session — working first, then archived, full ids, **unnumbered** |
 | `/archive_Put [num \| id \| title]` | Archive a current session — bare form prints a numbered menu |
 | `/archive_Pull [num \| id \| title]` | Restore an archived session — bare form prints a numbered menu |
-| `/session <id or title>` | Print a transcript (archived included) |
 | `/save [path.md]` | Write the session to Markdown, default `~/Documents/<title>.md` |
 
 `/save` takes an explicit output path when the argument ends in `.md`, so
@@ -104,6 +103,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/markdown.test.ts` | 13 | `messageText`, `slug`, `toMarkdown` |
 | `test/resolve.test.ts` | 9 | Store-backed resolver — the async form of `__resolve` |
 | `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |
+| `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 
 Fixtures: each test file builds its own throwaway DB in a temp dir via the
@@ -154,8 +154,8 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list_sessions`, `/archive_Put`, `/archive_Pull`, `/session` or
-`/save` in the palette does nothing at all.** The commands must be typed. A plugin cannot
+**clicking `/list_sessions`, `/archive_Put`, `/archive_Pull` or `/save` in the
+palette does nothing at all.** The commands must be typed. A plugin cannot
 register into the enum.
 
 This also plausibly explains an intermittent case where `/archive_Put 2` did
@@ -196,6 +196,27 @@ hl = struct.unpack("<I", d[12:16])[0]
 hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
 ```
 
+## Command Output Goes to Two Channels
+Every command writes to `~/.local/share/opencode/session-log/<timestamp>.md`
+**and** posts a synthetic message. Override with `OPENCODE_SESSION_LOG_DIR`.
+
+The file is not belt-and-braces, it is the load-bearing channel: the desktop app
+does not reliably render synthetic messages, so a command can appear to do
+nothing at all — indistinguishable from one that did nothing, which is the worst
+ambiguity for a command that archived three sessions. The file is written first
+and synchronously; if the synthetic call throws, the output is already on disk.
+
+`/session` was removed because `/list_sessions` covers it. The `readMessages`
+DB method stays — the `read_transcript` tool uses it.
+
+## An Out-of-Range Number Is Refused, Not Reinterpreted
+`pickByNumber` returns `outOfRange: string[]` alongside `ids` and `ambiguous`.
+A number is a position in the menu just shown and nothing else. It used to fall
+through to a text lookup, so `/archive_Put 99` could archive a session whose
+title merely contained "99" while the user believed they had picked a row that
+did not exist. `test/range.test.ts` guards this, including a seeded session
+titled "99 versions of the manual".
+
 ## Common Gotchas
 - **Every tool MUST set `options: { namespace: NS }`.** The host builds a tool's
   id as `<namespace>_<name>`, falling back to a bare `<name>` when
@@ -233,6 +254,9 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
 - **`list_sessions` is both a command and a tool name.** Different namespaces
   (commands are separate from `ctx.tool.transform`), so there is no collision —
   but do not "fix" the apparent duplicate.
+- **Editing `index.ts` reloads the plugin on every save**, and each reload
+  re-registers every command, which visibly re-renders the palette. A batch of
+  edits makes the screen flicker. Commit before testing.
 - **Cherry-picking an ancestor commit does not work here.** `8a754f6` predates
   `master`, so replaying it onto master re-applies a diff master already
   contains and partially undid — every file conflicts add/add. Recovering
@@ -247,12 +271,13 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
    basic auth `opencode:$PW`.
 4. Confirm load: `GET /api/plugin` → `source.type == "local"`.
 5. Confirm commands: `GET /api/command` → expect
-   `list_sessions, archive_Put, archive_Pull, session, save`
-   alongside `init, review`.
+   `list_sessions, archive_Put, archive_Pull, save` alongside `init, review`.
 6. Confirm no shadowing: prompt a session to use the **core** `read` tool and
    check it still reads a file.
 7. Confirm function: flip `time_archived` in `session_v2` via `/archive_Put`
    and `/archive_Pull`; write a Markdown file via `/save`.
+   `probe.ts` drives all of this headlessly — `node probe.ts <out>` to read,
+   `node probe.ts <out> --write` to exercise the archive/restore round trip.
 8. Kill the server and delete every test session — they land in the **real**
    database.
 
@@ -267,7 +292,9 @@ test/menu.test.ts         # menus, parsing, inventory, pickByNumber
 test/markdown.test.ts     # Markdown rendering
 test/resolve.test.ts      # store-backed resolver (__resolve with args only)
 test/namespacing.test.ts  # Guards tool namespacing / core-tool collisions
+test/range.test.ts        # Out-of-range numbers refused, not reinterpreted
 test/retention.test.ts    # Bounded backups
+probe.ts                  # Headless driver — run commands, capture to a file
 package.json           # main: "./index.ts", exports: ".": "./index.ts"
 tsconfig.json          # noEmit, strict, include: src/** test/**
 ```
@@ -304,5 +331,5 @@ curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config
 ```
 
 With the npm package loaded, expect exactly `['init', 'review', 'save']`. Any
-`list_sessions`, `archive_Put`, `archive_Pull` or `session` in that output
-means a local checkout is live.
+`list_sessions`, `archive_Put` or `archive_Pull` in that output means a local
+checkout is live.
