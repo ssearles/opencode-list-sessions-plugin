@@ -218,21 +218,23 @@ function inventoryRow(r: SessionRow): string {
 }
 
 /**
- * The whole inventory: working sessions first, then archived.
+ * `/list_sessions` — the whole inventory: working sessions first, then archived.
  *
- * Not currently reachable from any command — `/list` was replaced by
- * `/list_Current` and `/list_Archived`, which are numbered menus over one half
- * each. Kept, and kept tested, because it is the one view that shows every
- * session with its full id on a single screen, which is what you want when the
- * two halves need comparing. Wire it to a command or drop it with its tests.
+ * A read-only reference rather than a numbered menu, and deliberately
+ * unnumbered. Every line carries its full session id so a row can be selected
+ * with the mouse and pasted straight into `/archive_Put`, `/archive_Pull` or
+ * `/session`.
  *
- * Every line carries its full session id so a row can be selected with the mouse
- * and pasted straight into `/archive_Put`, `/archive_Pull` or `/session`.
+ * Numbering is omitted on purpose: the two write commands count different
+ * subsets (`/archive_Put` numbers current only, `/archive_Pull` numbers
+ * archived only), so one shared numbering would match neither menu once either
+ * group changed size. Copying an id is unambiguous, where a remembered number
+ * would not.
  *
- * Numbering is deliberately omitted: the two menus count different subsets
- * (`/archive_Put` numbers current only, `/archive_Pull` numbers archived only),
- * so a single shared numbering would match neither once either group changed
- * size. Copying an id is unambiguous, where a remembered number would not.
+ * This was briefly split into `/list_Current` and `/list_Archived` and put back.
+ * Splitting it lost the only single-screen view of both halves, and gained
+ * nothing: the numbered menus were always available by running `/archive_Put` or
+ * `/archive_Pull` with no argument.
  */
 function inventory(all: SessionRow[], limit = 60): string {
   if (all.length === 0) return "No sessions found."
@@ -312,39 +314,12 @@ export default {
 
     await ctx.command.transform((editor) => {
       editor.add({
-        name: "list_Current",
-        description: "Numbered list of current (unarchived) sessions",
+        name: "list_sessions",
+        description: "List every session — working first, then archived — with copyable ids",
         execute: async ({ sessionID }) => {
           try {
             const s = await store()
-            await say(
-              sessionID,
-              menu(await s.list({ archived: "active" }), {
-                heading: "Current sessions",
-                empty: "No current sessions.",
-                action: "Archive one with `/archive_Put <number>`, or name it directly.",
-              }),
-            )
-          } catch (err) {
-            await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        },
-      })
-
-      editor.add({
-        name: "list_Archived",
-        description: "Numbered list of archived sessions",
-        execute: async ({ sessionID }) => {
-          try {
-            const s = await store()
-            await say(
-              sessionID,
-              menu(await s.list({ archived: "only" }), {
-                heading: "Archived sessions",
-                empty: "No archived sessions.",
-                action: "Restore one with `/archive_Pull <number>`, or name it directly.",
-              }),
-            )
+            await say(sessionID, inventory(await s.list()))
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -388,7 +363,7 @@ export default {
               await say(
                 sessionID,
                 `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
-                  "Run `/list_Current` to see the current sessions, or name one exactly.",
+                  "Run `/list_sessions` to see them, or name one exactly.",
               )
               return
             }
@@ -512,7 +487,7 @@ export default {
               await say(
                 sessionID,
                 `Nothing matched "${args.join(" ")}", so nothing was restored. ` +
-                  "Run `/list_Archived` to see the archived sessions.",
+                  "Run `/list_sessions` to see them.",
               )
               return
             }

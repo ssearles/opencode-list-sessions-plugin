@@ -54,10 +54,9 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 ## Commands (slash — must be typed, see the palette note below)
 | Command | Purpose |
 |---------|---------|
-| `/list_Current` | Numbered list of current (unarchived) sessions |
-| `/archive_Put [num \| id \| title]` | Archive a current session |
-| `/list_Archived` | Numbered list of archived sessions |
-| `/archive_Pull [num \| id \| title>` | Restore an archived session — refuses ambiguous terms |
+| `/list_sessions` | Every session — working first, then archived, full ids, **unnumbered** |
+| `/archive_Put [num \| id \| title]` | Archive a current session — bare form prints a numbered menu |
+| `/archive_Pull [num \| id \| title]` | Restore an archived session — bare form prints a numbered menu |
 | `/session <id or title>` | Print a transcript (archived included) |
 | `/save [path.md]` | Write the session to Markdown, default `~/Documents/<title>.md` |
 
@@ -155,8 +154,8 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list_Current`, `/archive_Put`, `/list_Archived`, `/archive_Pull`,
-`/session` or `/save` in the palette does nothing at all.** The commands must be typed. A plugin cannot
+**clicking `/list_sessions`, `/archive_Put`, `/archive_Pull`, `/session` or
+`/save` in the palette does nothing at all.** The commands must be typed. A plugin cannot
 register into the enum.
 
 This also plausibly explains an intermittent case where `/archive_Put 2` did
@@ -206,7 +205,8 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
   file. This took the plugin offline once; `test/namespacing.test.ts` guards it,
   and it also forbids reusing a core tool name (`bash`, `edit`, `glob`, `grep`,
   `list`, `patch`, `read`, `shell`, `write`, …) even when namespaced. Note the
-  command `/list_Current` and the tool `list_sessions` differ for this reason.
+  the tool `list_sessions` and the command of the same name coexist for this
+  reason — and `list` as a bare tool name remains forbidden.
 - **Desktop app doesn't restart the background service** — closing/reopening the
   window reuses the existing `opencode-cli serve --service` process. Must run
   `opencode reload` or kill the service process to pick up config/plugin changes.
@@ -225,10 +225,14 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
   `index.ts` syntax errors went undetected until manual load testing.
 - Template literals with nested quotes: prefer concatenation (`"foo " + bar`)
   over `` `foo ${bar}` `` when the string contains both backticks and quotes.
-- **`inventory()` has no command.** `/list` was replaced by `/list_Current` and
-  `/list_Archived`. The function and its tests remain because it is still the
-  only view showing every session with a full id on one screen — wire it to a
-  command or delete it with `test/menu.test.ts`'s `/list inventory` block.
+- **`/list_sessions` must stay unnumbered.** It was briefly split into
+  `/list_Current` and `/list_Archived` and put back. Splitting it lost the only
+  single-screen view of both halves and gained nothing, since the numbered menus
+  were always available by running `/archive_Put` or `/archive_Pull` bare. If you
+  are tempted to unify them again, read `inventory()`'s doc comment first.
+- **`list_sessions` is both a command and a tool name.** Different namespaces
+  (commands are separate from `ctx.tool.transform`), so there is no collision —
+  but do not "fix" the apparent duplicate.
 - **Cherry-picking an ancestor commit does not work here.** `8a754f6` predates
   `master`, so replaying it onto master re-applies a diff master already
   contains and partially undid — every file conflicts add/add. Recovering
@@ -243,7 +247,7 @@ hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
    basic auth `opencode:$PW`.
 4. Confirm load: `GET /api/plugin` → `source.type == "local"`.
 5. Confirm commands: `GET /api/command` → expect
-   `list_Current, archive_Put, list_Archived, archive_Pull, session, save`
+   `list_sessions, archive_Put, archive_Pull, session, save`
    alongside `init, review`.
 6. Confirm no shadowing: prompt a session to use the **core** `read` tool and
    check it still reads a file.
@@ -300,5 +304,5 @@ curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config
 ```
 
 With the npm package loaded, expect exactly `['init', 'review', 'save']`. Any
-`list_Current`, `archive_Put`, `list_Archived`, `archive_Pull` or `session` in
-that output means a local checkout is live.
+`list_sessions`, `archive_Put`, `archive_Pull` or `session` in that output
+means a local checkout is live.
