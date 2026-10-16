@@ -13,7 +13,7 @@
 
 import { ArchiveError, SessionStore, type SessionRow } from "./src/db.ts"
 import { slug, toMarkdown } from "./src/markdown.ts"
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -417,11 +417,14 @@ function appendReport(body: string): void {
 
   const reports = [...kept, body.trim()].slice(-KEEP_REPORTS)
 
-  // Write via a temp file and rename, so a reader tailing this path never
-  // observes a half-written report.
-  const tmp = file + ".tmp"
-  writeFileSync(tmp, reports.map((r) => REPORT_MARK + "\n" + r).join("\n\n") + "\n", "utf8")
-  renameSync(tmp, file)
+  // Write in place, deliberately.
+  //
+  // This was temp-file-plus-rename, to stop a reader seeing a half-written
+  // report. But renaming replaces the inode, and a `tail -F` holding the old
+  // one then follows a file nothing writes to any more — so the pane froze
+  // while the log grew behind it. Atomicity buys very little for a log a person
+  // reads; following is the entire point. In-place it is.
+  writeFileSync(file, reports.map((r) => REPORT_MARK + "\n" + r).join("\n\n") + "\n", "utf8")
 }
 
 export default {

@@ -245,6 +245,14 @@ slot if you filter after slicing rather than before.
 `-n +1` matters as much as `-F`: plain `tail -f` prints only the last ten lines,
 which on a 14-line report hides the header.
 
+**Write `latest.md` in place. Do not use temp-file-plus-rename.** Renaming
+replaces the inode, and a `tail` holding the original inode then follows a file
+nothing writes to any more — the log grows correctly while the pane sits frozen.
+That bug shipped, and no test caught it: the session-log tests assert order, the
+cap, and that reports are never split, all of which hold under rename. Only a
+live follower exposes it, because the failure belongs to the writer-reader
+relationship rather than the writer.
+
 `/session` was removed because `/list_sessions` covers it. The `readMessages`
 DB method stays — the `read_transcript` tool uses it.
 
