@@ -89,6 +89,15 @@ row to open its strip:
 | Delete | Removes the session, after a dialog defaulting to Cancel |
 | Close | Nothing at all — backs out of the strip without writing |
 
+**Transcript.md extracts images.** A pasted screenshot is ~200KB of base64 PNG
+stored inline in the message's `files` list — not in a `part` row — so a reader
+that only looks at `text` drops every image with no trace. That is what happened:
+a transcript of a session with four screenshots in it contained none of them.
+Each image is now decoded to `<title>-images/NNN-name.png` beside the .md and
+referenced relatively, which is what makes it render. Capped at `MAX_IMAGES`
+(50), and the `--text` callers get a visible placeholder instead of a file, so
+something is always noted when something was there.
+
 Hyprland floats and centres it via a rule in `~/.config/hypr/looknfeel.lua`.
 **Do not add `pin = true` to that rule**: pinning means "show on all
 workspaces", so the popup followed the user onto every workspace.
@@ -176,9 +185,13 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 85 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
-| `popup/test-popup-writes.py` | 43 | The write path: archive/restore guards, delete, backups, ordering |
+| `popup/test-popup-gui.py` | 84 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
+| `popup/test-popup-writes.py` | 51 | The write path: archive/restore guards, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
+| `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
+| `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
+| `popup/test-info-save.py` | 23 | Save naming, timestamp collisions, markdown vs text output |
+| `popup/test-copy-gesture.py` | 8 | Select-then-Ctrl+C survives the window closing |
 
 Fixtures: each TypeScript test file builds its own throwaway DB in a temp dir
 via the `OPENCODE_DB` env var. Run with `node --test test/` — no compilation

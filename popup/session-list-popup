@@ -76,6 +76,7 @@ and every table keyed by `session_id`, in one transaction.
 """
 
 import argparse
+import base64
 import datetime
 import os
 import sqlite3
@@ -1134,14 +1135,20 @@ class Window(Gtk.Window):
         clobbering, since losing a transcript to a name collision is exactly
         the failure this button is meant to prevent.
         """
+        out_dir = self._out_dir()
+        target = out_dir / f"{slug_of(data['title'])}.md"
+        # Images go in a folder named after the transcript, and are referenced
+        # from it relatively -- `![](Title-images/001-image.png)`. That is what
+        # makes them render when the .md is opened, and it keeps the Downloads
+        # folder from filling with loose screenshots.
+        assets = out_dir / f"{target.stem}-images"
+
         try:
-            text = read_transcript(self.store, data["id"])
+            text, images, skipped = read_transcript(
+                self.store, data["id"], assets_dir=assets)
         except Exception as err:  # noqa: BLE001 - surfaced to the user
             self._toast(f"Could not read transcript: {err}", error=True)
             return
-
-        out_dir = self._out_dir()
-        target = out_dir / f"{slug_of(data['title'])}.md"
 
         header = (
             f"# {data['title'] or '(untitled)'}\n\n"
@@ -1155,17 +1162,29 @@ class Window(Gtk.Window):
         target.write_text(header + text, encoding="utf8")
 
         shown = short_home(target)
+        bits = []
+        if images:
+            bits.append(f"{images} image(s) in {assets.name}/")
+        if skipped:
+            bits.append(f"{skipped} could not be extracted")
+        tail = f"  ·  {', '.join(bits)}" if bits else ""
+
         if existed:
             # The previous transcript of a same-titled session is gone. Say so
             # rather than leaving the user to find out later.
-            self.status.set_text(f"Overwrote {shown}")
+            self.status.set_text(f"Overwrote {shown}{tail}")
             self._toast(
-                f"Overwrote {shown}\n\nAnother session already had this title, "
-                "so its transcript was replaced. Rename one of them first if "
-                "you need to keep both."
+                f"Overwrote {shown}{tail}\n\nAnother session already had this "
+                "title, so its transcript was replaced. Rename one of them "
+                "first if you need to keep both."
             )
         else:
-            self.status.set_text(f"Saved {shown}")
+            self.status.set_text(f"Saved {shown}{tail}")
+            if images:
+                self._toast(
+                    f"Saved {shown}\n\n{tail.replace('  ·  ', '')} — "
+                    f"they render when you open the .md."
+                )
 
     def _export_json(self, data: dict) -> None:
         """
@@ -1398,25 +1417,50 @@ def delete_session(store: Store, session_id: str) -> bool:
         db.close()
 
 
-def read_transcript(store: Store, session_id: str, limit: int = 0) -> str:
+def read_transcript(store: Store, session_id: str, limit: int = 0,
+                    assets_dir: Path | None = None) -> tuple[str, int, int]:
     """
     Pull displayable text out of a session, oldest first.
 
-    Message payloads differ by type and have changed shape between releases, so
-    this is forgiving on purpose: anything unrecognised is skipped rather than
-    raising, because a partial transcript still tells you what was discussed.
+    Returns `(markdown, images_written, images_skipped)`.
+
+    IMAGES
+
+    A pasted screenshot is stored inline as base64 in the message's `files`
+    list -- about 200KB of PNG per paste -- and not in a `part` row. Reading
+    only `text` therefore drops every image silently, which is exactly what
+    happened: a transcript of a session with four screenshots in it contained
+    none of them.
+
+    With `assets_dir` given, each inline image is decoded to a file beside the
+    transcript and referenced from the Markdown with a relative path, which is
+    what makes it render in Okular, Obsidian or a browser. A base64 blob cannot
+    be shown in a Markdown document; it has to become a file first.
+
+    Without `assets_dir` -- the `--text` and test callers -- images are noted in
+    the body as a placeholder rather than dropped without trace, so a reader can
+    see that something was there.
+
+    Skips are counted and reported rather than raising: an image whose MIME type
+    is unrecognised, or whose payload is not decodable, is a line of text rather
+    than a failed save.
+
+    Capped at MAX_IMAGES because a session can hold hundreds of pastes and the
+    point of the button is a readable transcript, not a disk image. The cap is
+    stated in the output when it bites.
     """
     db = store._connect()  # noqa: SLF001 - same module family
+    written = skipped = 0
     try:
         have = {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         table = next((t for t in ("session_message", "message") if t in have), None)
         if not table:
-            return "(no message table)"
+            return "(no message table)", 0, 0
         cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
         if "session_id" not in cols:
-            return "(no session_id column)"
+            return "(no session_id column)", 0, 0
 
         order = "seq ASC" if "seq" in cols else (
             "time_created ASC" if "time_created" in cols else "rowid ASC"
@@ -1445,15 +1489,90 @@ def read_transcript(store: Store, session_id: str, limit: int = 0) -> str:
                 )
             elif mtype == "synthetic":
                 text = parsed.get("text") or ""
+
+            # Images live on the message, not inside its text, so they are read
+            # for every message type rather than only the user's -- an assistant
+            # turn can carry a screenshot back.
+            notes = []
+            for attachment in (parsed.get("files") or parsed.get("attachments") or []):
+                note, made, miss = _image_markdown(
+                    attachment, written + skipped, assets_dir, MAX_IMAGES)
+                written += made
+                skipped += miss
+                if note:
+                    notes.append(note)
+
             text = (text or "").strip()
-            if text:
-                label = {"user": "You", "assistant": "Assistant"}.get(mtype, mtype)
-                out.append(f"### {label}\n\n{text}")
+            if not text and not notes:
+                continue
+            label = {"user": "You", "assistant": "Assistant"}.get(mtype, mtype)
+            body = "\n\n".join([text, *notes]) if text else "\n\n".join(notes)
+            out.append(f"### {label}\n\n{body}")
+
+        if written + skipped >= MAX_IMAGES:
+            out.append(
+                f"### Note\n\n{skipped} further image(s) were not extracted; "
+                f"the limit is {MAX_IMAGES} per transcript."
+            )
 
         body = "\n\n".join(out)
-        return body if limit <= 0 else body[-limit:]
+        return (body if limit <= 0 else body[-limit:]), written, skipped
     finally:
         db.close()
+
+
+# How many inline images to extract per transcript. High enough that an ordinary
+# session is complete, low enough that a paste-heavy one cannot fill the disk
+# from one click.
+MAX_IMAGES = 50
+
+
+def _image_markdown(attachment: dict, index: int, assets_dir: Path | None,
+                    limit: int) -> tuple[str, int, int]:
+    """
+    Turn one attachment into a Markdown line.
+
+    Returns `(line, written, skipped)`. `line` is empty when the attachment is
+    not an image at all -- a pasted file path, say -- because those are text and
+    belong in the body rather than being written beside it.
+    """
+    mime = (attachment.get("mime") or attachment.get("mimeType") or "").lower()
+    if mime and not mime.startswith("image/"):
+        return "", 0, 0
+
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+           "image/webp": ".webp"}.get(mime, ".png")
+    name = (attachment.get("name") or "").strip()
+    stem = "".join(c if c.isalnum() or c in "-_" else "-" for c in name).strip("-")
+
+    if assets_dir is None:
+        kb = len(attachment.get("data") or "") * 3 // 4 // 1024
+        return (f"*[image: {name or 'screenshot'}, {mime or 'unknown type'}, "
+                f"~{kb} KB — extract with Transcript.md]*"), 0, 0
+
+    if index >= limit:
+        return "", 0, 1
+
+    payload = attachment.get("data") or ""
+    if not payload:
+        return "", 0, 1
+    # Tolerate a data: URL prefix; the payload is bare base64 today but this
+    # costs nothing and would not have been true on every release.
+    payload = payload.split(",", 1)[1] if payload.startswith("data:") else payload
+    try:
+        blob = base64.b64decode(payload, validate=False)
+    except Exception:  # noqa: BLE001
+        return "", 0, 1
+
+    filename = f"{index + 1:03d}-{stem or 'image'}{ext}"
+    try:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        (assets_dir / filename).write_bytes(blob)
+    except OSError:
+        return f"*[image: {name or 'image'} — could not be written]*", 0, 1
+
+    alt = stem or "screenshot"
+    return f"![{alt}]({assets_dir.name}/{filename})", 1, 0
 
 
 def main() -> int:

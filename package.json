@@ -23,9 +23,10 @@
     "popup/session-list-popup"
   ],
   "scripts": {
-    "test": "node --test test/ && npm run test:popup",
+    "test": "node --test test/ && npm run test:popup && npm run test:info",
     "test:plugin": "node --test test/",
-    "test:popup": "python3 popup/test-popup-writes.py && python3 popup/test-popup-lifecycle.py && python3 popup/test-popup-gui.py",
+    "test:popup": "python3 popup/test-popup-writes.py && python3 popup/test-popup-lifecycle.py && python3 popup/test-popup-scroll.py && python3 popup/test-popup-gui.py",
+    "test:info": "python3 popup/test-info-window.py && python3 popup/test-info-save.py && python3 popup/test-copy-gesture.py",
     "install:popup": "ln -sf \"$PWD/popup/session-list-popup\" \"$HOME/.local/bin/session-list-popup\"",
     "check": "node -e \"Promise.all([import('./index.ts'),import('./src/db.ts')]).then(()=>console.log('modules load OK')).catch(e=>{console.error(e);process.exit(1)})\"",
     "typecheck": "tsc --noEmit"

@@ -94,6 +94,19 @@ def write(db: Path, sql: str, *args) -> None:
         c.close()
 
 
+def _session_with_an_image(db: Path) -> str | None:
+    """The id of a session in the copy holding an inline image, if any."""
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        for sid, raw in c.execute(
+                "SELECT session_id, data FROM session_message WHERE type = 'user'"):
+            if '"files"' in raw and '"image/' in raw:
+                return sid
+        return None
+    finally:
+        c.close()
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="popup-test-"))
     real_before = archived_ids(REAL)
@@ -344,10 +357,45 @@ def main() -> int:
 
         # ------------------------------------------------------- transcript
         print("\ntranscript reader")
-        text = pop.read_transcript(store, target)
+        text, n_img, n_skip = pop.read_transcript(store, target)
         check("transcript is non-empty", len(text) > 100, f"{len(text)} chars")
         check("transcript has message headings", text.count("### ") > 0,
               f"{text.count('### ')} messages")
+
+        print("\nimages are noted even when not extracted")
+        # The failure this guards: a pasted screenshot is ~200KB of base64 in
+        # the message's `files` list, and a reader that only looks at `text`
+        # drops every one of them with no trace. A transcript of this session
+        # had four screenshots in it and contained none of them.
+        check("image counts are returned", isinstance(n_img, int) and isinstance(n_skip, int),
+              f"{n_img} written, {n_skip} skipped")
+        check("nothing is written when no directory is given", n_img == 0)
+
+        img_sid = _session_with_an_image(db)
+        if img_sid:
+            check("a message with an inline image exists in the copy", True, img_sid)
+            text2, _, _ = pop.read_transcript(store, img_sid)
+            check("the image is mentioned, not silently dropped",
+                  "[image:" in text2,
+                  "no placeholder and no reference in the transcript")
+
+            assets = tmp / "assets-test"
+            text3, written3, _ = pop.read_transcript(store, img_sid, assets_dir=assets)
+            check("with a directory the image is decoded to a file", written3 >= 1,
+                  f"{written3} written")
+            files = sorted(p.name for p in assets.iterdir()) if assets.exists() else []
+            check("the file is a real PNG", bool(files) and files[0].endswith(".png"),
+                  str(files))
+            if files:
+                head = (assets / files[0]).read_bytes()[:8]
+                check("and its bytes are a PNG, not base64 text",
+                      head == b"\x89PNG\r\n\x1a\n", repr(head))
+                check("the transcript references it relatively",
+                      f"{assets.name}/{files[0]}" in text3,
+                      "no relative link in the markdown")
+        else:
+            check("a message with an inline image exists in the copy", True,
+                  "skipped: none in this copy")
 
         # ------------------------------------------------- real db untouched
         print("\nthe real database was not modified by this run")
