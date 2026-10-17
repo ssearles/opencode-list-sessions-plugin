@@ -4,3 +4,6 @@ node_modules/
 # Database snapshots written by the plugin at runtime.
 backups/
 *.backup-*.db
+# Python bytecode from the popup test suites.
+__pycache__/
+*.pyc

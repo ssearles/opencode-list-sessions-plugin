@@ -21,7 +21,10 @@ ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/  (122 tests, no install required)
+npm test          # node --test test/ (131) + the three popup suites (134 checks)
+npm run test:plugin   # the TypeScript suite alone
+npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
+npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
 npm run check     # verifies index.ts and src/db.ts load without syntax errors
 npm run typecheck # tsc --noEmit (requires TypeScript installed)
 ```
@@ -71,8 +74,11 @@ each other**, which is why the explicit form exists. Override the default folder
 with `OPENCODE_TRANSCRIPT_DIR`.
 
 ## The Popup Window
-`~/.local/bin/session-list-popup`, a Python/GTK3 script that reads and writes
-the same database directly. Right-click a row to open its strip:
+`popup/session-list-popup` in this repo, installed to
+`~/.local/bin/session-list-popup` as a **symlink** (`npm run install:popup`).
+The repo copy is the source of truth; edit it there, not in `~/.local/bin`.
+A GTK3 script that reads and writes the same database directly. Right-click a
+row to open its strip:
 
 | Button | Does |
 |--------|------|
@@ -81,9 +87,13 @@ the same database directly. Right-click a row to open its strip:
 | Transcript.md | Full transcript to `~/Downloads/<title>.md` |
 | Export .json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
 | Delete | Removes the session, after a dialog defaulting to Cancel |
-| Close | Nothing at all |
+| Close | Nothing at all — backs out of the strip without writing |
 
-Three things about it that are easy to get wrong:
+Hyprland floats and centres it via a rule in `~/.config/hypr/looknfeel.lua`.
+**Do not add `pin = true` to that rule**: pinning means "show on all
+workspaces", so the popup followed the user onto every workspace.
+
+Five things about it that are easy to get wrong:
 
 - **The desktop app's session menu cannot be refreshed from here.** It caches
   its list and no event re-fetches it. A rename-based resync through the
@@ -94,14 +104,35 @@ Three things about it that are easy to get wrong:
   `show_all()`, which can shift focus, which fires `focus-in-event` again. That
   feedback loop showed as continuous blinking. `_on_focus_in` is now a no-op
   and `test-popup-gui.py` asserts 20 focus-ins cause zero reloads.
+- **Do not set `halign` on the button `Gtk.FlowBox`.** `halign` on a FlowBox
+  means "don't expand me", and a FlowBox asked for its natural width computes a
+  single column — six buttons stacked one per line, the last one below the fold.
+  `child-alignment`, which is what actually expresses "right-align the
+  children", is absent from this PyGObject binding and raises AttributeError.
 - **`Export .json` shells out to the CLI rather than building the payload.** The
   import format is the CLI's to define and has changed between releases; a
-  hand-assembled payload that is one field out imports to an empty session,
-  which is worse than no export because it looks like it worked.
+  hand-assembled payload one field out imports to an empty session, which is
+  worse than no export because it looks like it worked.
+- **`delete_session()` checks its refusals before taking a snapshot.** Snapshot
+  first meant every refused delete consumed one of the three retained backups,
+  so three refusals evicted the very snapshot holding a real deletion.
 
-Tests live in `/tmp/opencode/`: `test-popup-gui.py`, `test-popup-writes.py`,
-`test-popup-lifecycle.py`. All three work on `VACUUM INTO` copies and assert the
-real database is unchanged.
+### Popup tests
+`popup/test-popup-{gui,writes,lifecycle}.py`, run by `npm test` (or
+`npm run test:popup`). They default to testing the repo copy; set
+`SESSION_POPUP` to point at an installed build instead.
+
+They work on `VACUUM INTO` copies and assert the real database is unchanged.
+Never point them at the real one. The GUI suite needs a display — it was
+written for a Wayland session, so `WAYLAND_DISPLAY` must be set.
+
+Two lessons from writing them, each of which cost a false failure:
+
+- **Compare headings by their first word.** A check that restated the full
+  heading sentence broke on any copy edit to wording it was not testing.
+- **Never compare the window against the database mid-sequence.** Some blocks
+  deliberately write to the database without reloading, so the window is stale
+  on purpose. Reload first, then compare, or you are testing staleness.
 
 ## Tools (agent-callable, namespace `session_archive`)
 | Tool | Purpose |
@@ -145,9 +176,14 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
+| `popup/test-popup-gui.py` | 85 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
+| `popup/test-popup-writes.py` | 43 | The write path: archive/restore guards, delete, backups, ordering |
+| `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 
-Fixtures: each test file builds its own throwaway DB in a temp dir via the
-`OPENCODE_DB` env var. Run with `node --test test/` — no compilation needed.
+Fixtures: each TypeScript test file builds its own throwaway DB in a temp dir
+via the `OPENCODE_DB` env var. Run with `node --test test/` — no compilation
+needed. The popup suites are Python and build their own copies with
+`VACUUM INTO`; see "Popup tests" above.
 
 ## Test Suite History — Do Not Trust a Merge to Keep It
 `f5a38ef` deleted four of these test files while rewriting `index.ts`, and a
@@ -349,7 +385,7 @@ titled "99 versions of the manual".
   it forward, not cherry-picking.
 
 ## Verifying a Change End-to-End
-1. `npm test` and `npm run check`
+1. `npm test` (plugin suite + popup suites) and `npm run check`
 2. Start a throwaway server: `(setsid opencode serve --port NNNN > log 2>&1 < /dev/null &)`
    with `opencode.json` in the server's resolved project root.
 3. Password comes from the `server password …` line in the log; all calls use
@@ -381,6 +417,10 @@ test/naming.test.ts       # Text must not name a command that no longer exists
 test/range.test.ts        # Out-of-range numbers refused, not reinterpreted
 test/sessionlog.test.ts   # The running output log appends and trims
 test/retention.test.ts    # Bounded backups
+popup/session-list-popup  # The GTK window — source of truth, symlinked into ~/.local/bin
+popup/test-popup-gui.py   # Widgets, strips, layout, delete dialog, export
+popup/test-popup-writes.py    # Write path: guards, delete, backups, ordering
+popup/test-popup-lifecycle.py  # Closing ends the process; no orphans
 probe.ts                  # Headless driver — run commands, capture to a file
 package.json           # main: "./index.ts", exports: ".": "./index.ts"
 tsconfig.json          # noEmit, strict, include: src/** test/**

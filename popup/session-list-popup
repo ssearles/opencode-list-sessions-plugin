@@ -1,0 +1,1501 @@
+#!/usr/bin/env python3
+"""
+OpenCode session inventory in a GTK window, with archiving on right-click.
+
+The desktop app's own archive button is compiled out of the renderer
+(`d8=!1` in app.asar gates it), and the plugin's slash commands only render
+to a synthetic message the desktop app may never display. This reads the same
+database and provides a window that works either way.
+
+ARCHIVING LIVES HERE, not in OpenCode. The plugin's `/archive_Put` and
+`/archive_Pull` commands were removed so there is only one archive path: right-
+click a session, then press Archive on it, or Restore if it is already
+archived. The desktop app cannot offer this either -- its archive button is
+compiled out of the renderer (`d8=!1` in app.asar gates it).
+
+RIGHT-CLICKING A ROW OPENS ITS BUTTONS, and the strip carries its own Close,
+which does nothing but put it away. Opening a strip used to be one click with
+three ways out that were all undiscoverable from the strip itself: Escape, a
+second click on the same row, or clicking some other row. Close is the exit
+that is visible from where you are.
+
+The buttons on every row, archived or not:
+
+  Archive / Restore  the primary action, and the one the section heading
+                     promises. Disabled on the live session, and refused by
+                     the write path too.
+  Copy id            the session id, for handing to the CLI.
+  Transcript.md      the whole conversation as Markdown, to
+                     ~/Downloads/<title>.md. For reading.
+  Export .json       OpenCode's own export format, to ~/Downloads/<title>.json,
+                     importable with `opencode session import`. The only route
+                     that leaves this machine: archive and restore are direct
+                     writes to this database and exist nowhere else.
+  Delete             removes the session and its messages, after a dialog that
+                     defaults to Cancel and offers Archive instead. Also
+                     refused for the live session.
+  Close              nothing at all.
+
+DELETING is the one action here with no way back from this window, so it is
+the only one that asks. A snapshot is taken before it, as for every write --
+but only the last three snapshots are kept, so a delete is close to
+irreversible, and the tooltip says so.
+
+THE LIST IS GROUPED BY STATE, which is what tells you which action applies:
+
+  Unarchived sessions first, then archived ones, each under a heading naming
+  the action that row offers. An archived session cannot be archived again and
+  a working one cannot be restored, so the grouping is the instruction.
+
+Rows are sorted by session name within each section. Rows are unnumbered: every
+action here is a click, so a number in front of a row was a position the user
+had to remember and could not use. Archiving moves a session between sections
+anyway, so a number would have been stale the moment it was read.
+
+WRITES follow the plugin's safety model from src/db.ts:
+
+  - A `VACUUM INTO` snapshot is taken before any write, which is consistent
+    even while OpenCode holds the database open in WAL mode.
+  - Only `time_archived` and `time_updated` are ever written. No message row
+    is touched, on either side of the operation.
+  - Snapshots are capped, so the backups directory cannot grow without bound.
+  - Writes are wrapped in `BEGIN IMMEDIATE` with a busy timeout, and a failure
+    rolls back rather than leaving a half-applied change.
+  - Restoring also refreshes `time_updated`, which is required: OpenCode sorts
+    by that column and pages per directory, so clearing the flag alone leaves
+    the session buried where it cannot be reached.
+
+The database is opened read-write. Archiving and restoring touch only
+`time_archived` and `time_updated`, and no message row is touched on either
+side of that operation. Deleting is the exception: it removes the session row
+and every table keyed by `session_id`, in one transaction.
+
+  session-list-popup              the window
+  session-list-popup --copy       print the plain-text list to stdout
+  session-list-popup --db PATH    use a different database (used by the tests)
+"""
+
+import argparse
+import datetime
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+# Mirrors shortDir() in the plugin: last two path segments.
+SHORT_DIR_MAX = 2
+
+# Custom response ids for the delete confirmation. Gtk.ResponseType in GTK3 has
+# no DELETE, and pinning "Archive instead" to ACCEPT and "Delete" to REJECT
+# makes the handler read as though the two meanings were swapped.
+RESP_ARCHIVE_INSTEAD = 1
+RESP_DELETE = 2
+
+
+def short_dir(directory: str) -> str:
+    parts = [p for p in (directory or "").split("/") if p]
+    return "/".join(parts[-SHORT_DIR_MAX:]) if parts else "-"
+
+
+def short_home(path: Path) -> str:
+    """A path with the home directory shown as ~, so it is readable at width."""
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home):] if text.startswith(home) else text
+
+
+def slug_of(title: str | None) -> str:
+    """
+    A filesystem-safe stem from a session title.
+
+    Titles are prose -- they carry punctuation, slashes and quotes -- so they
+    cannot go into a filename as they are. The mapping is lossy and that is
+    accepted: the collision it allows between two similarly-titled sessions is
+    reported by the caller rather than prevented, because uniqueness would mean
+    inventing names the user did not ask for.
+    """
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in (title or "")).strip("-")
+    return slug or "session"
+
+
+def by_name(rows: list[dict]) -> list[dict]:
+    """
+    Sort session rows by title, the way the window lists them.
+
+    Case-insensitive, so "apple" and "Banana" do not file under two different
+    letters. Untitled sessions sort last rather than first, since an empty
+    title would otherwise beat every real one on the alphabet. `id` breaks the
+    final tie: titles repeat, and a list that reorders itself on every write is
+    unreadable while you are reaching for a row in it.
+    """
+    return sorted(
+        rows,
+        key=lambda d: (
+            not (d.get("title") or "").strip(),
+            (d.get("title") or "").strip().lower(),
+            d.get("id") or "",
+        ),
+    )
+
+
+def stamp(ms) -> str:
+    if not ms:
+        return "-"
+    return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+
+def default_db() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "opencode" / "opencode.db"
+
+
+class Store:
+    """
+    Read/write access to the session table.
+
+    Schema-agnostic in the same way the plugin is: the table is discovered
+    (`session_v2` preferred over `session`) and its columns introspected, so a
+    release that adds or drops a column degrades instead of throwing.
+    """
+
+    RETAIN = 3
+
+    def __init__(self, path: Path):
+        self.path = path
+        if not path.exists():
+            raise SystemExit(f"No database at {path}")
+        self._connect().close()  # fail fast and clearly
+        self.table, self.columns = self._detect()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path, timeout=15.0)
+
+    def _detect(self) -> tuple[str, set[str]]:
+        db = self._connect()
+        try:
+            have = {
+                r[0]
+                for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            for candidate in ("session_v2", "session"):
+                if candidate in have:
+                    cols = {r[1] for r in db.execute(f"PRAGMA table_info({candidate})")}
+                    return candidate, cols
+            raise SystemExit(
+                "No session table found. Looked for session_v2 and session; "
+                f"found: {', '.join(sorted(have)) or 'nothing'}."
+            )
+        finally:
+            db.close()
+
+    # ---------------------------------------------------------------- reads
+
+    def _message_expr(self, db: sqlite3.Connection) -> str:
+        """A per-session message count, or NULL if no message table is usable."""
+        have = {
+            r[0]
+            for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in ("session_message", "message", "message_part"):
+            if table not in have:
+                continue
+            cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+            if "session_id" in cols:
+                return f"(SELECT COUNT(*) FROM {table} WHERE session_id = s.id)"
+        return "NULL"
+
+    def list(self, archived: str = "all") -> list[dict]:
+        """
+        Sessions ordered the way the plugin orders them.
+
+        `ORDER BY time_updated DESC` puts the most recently touched session
+        first, which is the order the window shows and the order archiving
+        reshuffles. Do not "improve" this into a different sort.
+        """
+        if "time_archived" not in self.columns:
+            raise SystemExit(f"Table {self.table} has no time_archived column.")
+
+        db = self._connect()
+        try:
+            col = lambda n: (f"s.{n}" if n in self.columns else "NULL")  # noqa: E731
+            order = "time_updated" if "time_updated" in self.columns else "time_created"
+
+            sql = (
+                f"SELECT s.id AS id, {col('title')} AS title, "
+                f"{col('directory')} AS directory, {col('time_created')} AS time_created, "
+                f"{col('time_updated')} AS time_updated, s.time_archived AS time_archived, "
+                f"{col('time_suspended')} AS time_suspended, "
+                f"{self._message_expr(db)} AS messages FROM {self.table} s"
+            )
+            if archived == "only":
+                sql += " WHERE s.time_archived IS NOT NULL"
+            elif archived == "active":
+                sql += " WHERE s.time_archived IS NULL"
+
+            sql += f" ORDER BY s.{order} DESC"
+
+            columns = (
+                "id",
+                "title",
+                "directory",
+                "time_created",
+                "time_updated",
+                "time_archived",
+                "time_suspended",
+                "messages",
+            )
+            out = []
+            for raw in db.execute(sql):
+                d = dict(zip(columns, raw))
+                d["archived"] = d["time_archived"] is not None
+                out.append(d)
+
+            # Mark the session you are working in right now, so it cannot be
+            # archived by accident from this window.
+            #
+            # The signal is `time_suspended`: the desktop app sets it on the
+            # session that is live, and leaves it NULL on every other. Only one
+            # session carries it at a time. This is a heuristic, not a fact --
+            # a session you are only looking at has no timestamp -- so it marks
+            # the most recently active session rather than whatever happens to
+            # be on screen.
+            live = max(
+                (d for d in out if d.get("time_suspended")),
+                key=lambda d: d["time_suspended"],
+                default=None,
+            )
+            live_id = live["id"] if live else None
+            for d in out:
+                d["is_live"] = d["id"] == live_id
+            return out
+        finally:
+            db.close()
+
+    # --------------------------------------------------------------- writes
+
+    def _backup_dir(self) -> Path:
+        return self.path.parent / "backups"
+
+    def backup(self) -> Path:
+        """Snapshot with VACUUM INTO, then trim to RETAIN.
+
+        VACUUM INTO rather than a file copy because it is consistent even while
+        OpenCode holds the source open in WAL mode. It refuses to overwrite, so
+        pick the first free name.
+        """
+        target_dir = self._backup_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        base = self.path.name.removesuffix(".db")
+        stamp_txt = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        target = target_dir / f"{base}.backup-{stamp_txt}.db"
+        n = 1
+        while target.exists():
+            target = target_dir / f"{base}.backup-{stamp_txt}-{n}.db"
+            n += 1
+
+        db = self._connect()
+        try:
+            db.execute("VACUUM INTO ?", (str(target),))
+        finally:
+            db.close()
+
+        self._prune()
+        return target
+
+    def _prune(self) -> None:
+        """Drop the oldest snapshots beyond RETAIN. Never fatal."""
+        try:
+            prefix = self.path.name.removesuffix(".db") + ".backup-"
+            mine = sorted(
+                (f for f in self._backup_dir().iterdir() if f.name.startswith(prefix)),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            # Slice, not index. `mine[RETAIN]` raises IndexError whenever fewer
+            # than RETAIN snapshots exist yet, which is every first few writes.
+            for old in mine[self.RETAIN :]:
+                old.unlink()
+        except OSError:
+            pass  # housekeeping, not worth failing a write over
+
+    def set_archived(self, ids: list[str], archived: bool) -> dict:
+        """Archive or restore. Returns changed ids, errors, and the backup."""
+        unique = list(dict.fromkeys(i for i in ids if i))
+        result = {"changed": [], "errors": [], "backup": None}
+        if not unique:
+            return result
+
+        # Snapshot first. If the backup fails there is no write at all, which
+        # is the safe direction to fail in.
+        result["backup"] = self.backup()
+
+        now = int(datetime.datetime.now().timestamp() * 1000)
+        has_updated = "time_updated" in self.columns
+        if archived:
+            sql = f"UPDATE {self.table} SET time_archived = ? WHERE id = ?"
+        elif has_updated:
+            sql = f"UPDATE {self.table} SET time_archived = NULL, time_updated = ? WHERE id = ?"
+        else:
+            sql = f"UPDATE {self.table} SET time_archived = NULL WHERE id = ?"
+
+        db = self._connect()
+        try:
+            db.execute("PRAGMA busy_timeout = 15000")
+            db.execute("BEGIN IMMEDIATE")
+            for sid in unique:
+                try:
+                    exists = db.execute(
+                        f"SELECT 1 FROM {self.table} WHERE id = ?", (sid,)
+                    ).fetchone()
+                    if not exists:
+                        result["errors"].append(f"{sid}: no such session")
+                        continue
+
+                    # Refuse to archive the live session, checked here rather
+                    # than only in the UI. A disabled button is a courtesy; this
+                    # is the rule. Without it, any caller of this method could
+                    # archive the conversation the user is standing in.
+                    if archived and self._is_live(db, sid):
+                        result["errors"].append(
+                            f"{sid}: this is the session currently open in "
+                            "OpenCode, and cannot be archived from here"
+                        )
+                        continue
+
+                    params = (now, sid) if (archived or has_updated) else (sid,)
+                    cur = db.execute(sql, params)
+                    if cur.rowcount > 0:
+                        result["changed"].append(sid)
+                    else:
+                        result["errors"].append(f"{sid}: no rows changed")
+                except sqlite3.Error as err:
+                    result["errors"].append(f"{sid}: {err}")
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        return result
+
+    def _is_live(self, db: sqlite3.Connection, session_id: str) -> bool:
+        """True when this session is the one currently open in OpenCode.
+
+        Read inside the write transaction so the check cannot race with the
+        update. See list() for why `time_suspended` is the signal.
+        """
+        if "time_suspended" not in self.columns:
+            return False
+        row = db.execute(
+            f"SELECT 1 FROM {self.table} WHERE id = ? AND time_suspended IS NOT NULL",
+            (session_id,),
+        ).fetchone()
+        return row is not None
+
+
+# --------------------------------------------------------------------- text
+
+
+def plain_text(store: Store) -> str:
+    """
+    The same list as the window, for stdout and tests.
+
+    Unnumbered, and sorted by name, for the same reasons the window is: the
+    actions live on buttons, so there is nothing to type a number into, and the
+    plugin's own `/list_sessions` is deliberately unnumbered too. Every line
+    carries its full session id, which is unambiguous where a remembered
+    position would not be.
+    """
+    rows = store.list()
+    working = by_name([r for r in rows if not r["archived"]])
+    archived = by_name([r for r in rows if r["archived"]])
+
+    def block(heading: str, items: list[dict]) -> list[str]:
+        if not items:
+            return []
+        lines = [f"{heading} ({len(items)})", ""]
+        for d in items:
+            msgs = d["messages"] if d["messages"] is not None else "?"
+            lines.append(f"  {d['title'] or '(untitled)'}")
+            bits = [f"{msgs} msg", stamp(d["time_updated"])]
+            if d["directory"]:
+                bits.append(short_dir(d["directory"]))
+            # Same wording as the plugin's /list_sessions, so the two agree on
+            # what state a row is in and what can be done to it.
+            action = "Restore" if d["archived"] else "Archive"
+            state = "archived" if d["archived"] else "unarchived"
+            bits.append(f"{state} · {action}")
+            lines.append(f"     {d['id']}  ·  " + "  ·  ".join(bits))
+        return lines
+
+    out = block("Unarchived — right-click one to Archive", working)
+    out += [""] + block("Archived — right-click one to Restore", archived)
+    out += ["", "Run this without --copy for the window with Archive/Restore buttons."]
+    return "\n".join(out).strip()
+
+
+# --------------------------------------------------------------------- GUI
+
+
+# Light scheme: black text on white, following the platform theme rather than
+# imposing one. Two earlier attempts hard-coded a dark background, and both
+# mis-rendered: GTK3 applies the theme's own foreground to labels in ways that
+# `color` alone does not reliably override, so dark text landed on a dark field
+# and the session titles became unreadable. Setting colours per class and
+# letting the theme own the rest is the supported route.
+#
+# The CSS is a bytes literal, so it must stay pure ASCII. A non-ASCII character
+# in a comment here is a SyntaxError, not a rendering glitch.
+CSS = b"""
+window { background-color: #ffffff; color: #000000; }
+
+.banner {
+  padding: 10px 14px;
+  background-color: #f0f0f0;
+  border-bottom: 1px solid #d0d0d0;
+}
+.banner-title { color: #000000; font-size: 13px; font-weight: 700; }
+.banner-hint  { color: #555555; font-size: 11px; }
+
+/* The title identifies the session, so it is the strongest text in the row.
+   Black, not a dimmed white - a dark background was tried and abandoned. */
+.title { color: #000000; font-size: 13px; font-weight: 700; }
+.meta  { color: #444444; font-size: 11px; }
+.id    { color: #666666; font-size: 10px; font-family: monospace; }
+
+.chip {
+  background-color: #f5e6c8;
+  color: #6b4c12;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+/* The live session. Distinct from ARCHIVED so the two states cannot be
+   confused at a glance: one is protected, the other is filed. */
+.chip-live {
+  background-color: #d8ecf7;
+  color: #14506f;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+/* The row you have picked out - this is what tells you which session an
+   action will hit. */
+row.selected { background-color: #d6e8f5; }
+row.selected .title { color: #000000; }
+
+/* The action strip under a right-clicked row. */
+.actions {
+  background-color: #eef4f8;
+  border: 1px solid #a8c4d8;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.actions-label { color: #1a4a66; font-size: 10px; font-weight: 700; }
+.btn-archive {
+  background-image: none;
+  background-color: #c05757;
+  color: #ffffff;
+  font-weight: 700;
+  border-radius: 4px;
+}
+.btn-restore {
+  background-image: none;
+  background-color: #4a8f63;
+  color: #ffffff;
+  font-weight: 700;
+  border-radius: 4px;
+}
+/* Delete is destructive and irreversible from this window, so it is outlined
+   rather than filled: it must be findable without looking like the safe
+   action it sits beside. Archive is the filled red one. */
+.btn-delete {
+  background-image: none;
+  background-color: #ffffff;
+  color: #a32222;
+  font-weight: 700;
+  border: 1px solid #a32222;
+  border-radius: 4px;
+}
+/* The do-nothing exit. Quiet on purpose: closing a strip is not an action
+   anyone needs to be drawn to. */
+.btn-quiet { color: #555555; }
+/* Greyed rather than coloured: an action that is refused should not look
+   available. GTK already dims an insensitive button, so this only has to stop
+   the red archive colour from implying it is still clickable. */
+.btn-blocked {
+  background-image: none;
+  background-color: #c8c8c8;
+  color: #707070;
+}
+
+.section {
+  color: #333333;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 12px 14px 4px 14px;
+}
+
+.hintbar {
+  padding: 8px 14px;
+  border-top: 1px solid #d0d0d0;
+  background-color: #f0f0f0;
+}
+.hintbar-label { color: #444444; font-size: 11px; }
+"""
+
+
+class Window(Gtk.Window):
+    def __init__(self, store: Store):
+        super().__init__(title="OpenCode sessions")
+        # Ask to float and to centre, and to stay above other windows if the
+        # compositor honours it. Hyprland does not honour GTK's transient-for
+        # hint from a detached launch, which is why there is also a window rule
+        # in looknfeel.lua -- this is the portable half of the same request.
+        self.set_type_hint(Gdk.WindowType.TOPLEVEL)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.store = store
+        self.set_default_size(900, 620)
+        self.rows: list[dict] = []
+
+        # Size to the screen rather than a fixed guess. The window is floated
+        # and centred by a Hyprland rule in ~/.config/hypr/looknfeel.lua, so
+        # this only has to ask for a sensible size and stay inside the screen.
+        #
+        # Clamped, because a fixed 1100x760 request on a 1366x768 panel with
+        # decorations is wider than the usable area and gets clipped.
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            sw, sh = screen.get_width(), screen.get_height()
+            self.set_size_request(
+                min(400, sw - 60),
+                min(320, sh - 100),
+            )
+            self.set_default_size(
+                min(1100, int(sw * 0.80)),
+                min(720, int(sh * 0.80)),
+            )
+
+        css = Gtk.CssProvider()
+        css.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(root)
+
+        # ---- header
+        banner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        banner.get_style_context().add_class("banner")
+        t = Gtk.Label(label="OpenCode sessions")
+        t.get_style_context().add_class("banner-title")
+        t.set_xalign(0)
+        h = Gtk.Label(
+            label="Right-click a session to open its buttons: Archive or "
+            "Restore, Transcript.md, Export .json, Delete, and Close to back "
+            "out without doing anything.\n\n"
+            "Both file buttons write to ~/Downloads and say where. Delete asks "
+            "first and can be replaced with Archive instead.\n\n"
+            "OpenCode's own session menu caches its list and will not re-read it "
+            "when you close this window. If you archive, restore or delete here, "
+            "restart OpenCode before expecting that list to match."
+        )
+        h.get_style_context().add_class("banner-hint")
+        h.set_xalign(0)
+        banner.pack_start(t, False, False, 0)
+        banner.pack_start(h, False, False, 0)
+        root.pack_start(banner, False, False, 0)
+
+        # ---- scrolling list
+        scroller = Gtk.ScrolledWindow()
+        # AUTOMATIC horizontally, not NEVER. NEVER means content wider than
+        # the window is clipped silently, which is how buttons disappeared on a
+        # narrow tile. With AUTOMATIC the row scrolls instead, so an action is
+        # always reachable however little width there is.
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.listbox = Gtk.ListBox()
+        # SINGLE, not NONE: right-click has to leave a visible selection, or
+        # there is no confirmation of which session an action would hit.
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.connect("row-selected", self._on_row_selected)
+        scroller.add(self.listbox)
+        root.pack_start(scroller, True, True, 0)
+
+        # ---- footer
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        footer.get_style_context().add_class("hintbar")
+        self.status = Gtk.Label(label="")
+        self.status.get_style_context().add_class("hintbar-label")
+        self.status.set_xalign(0)
+        self.status.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+        footer.pack_start(self.status, True, True, 0)
+
+        # No Refresh button. The window refreshes itself after every write it
+        # makes -- archive, restore, delete -- and re-reads the database on
+        # launch, so its own list cannot go stale while you are looking at it. A
+        # manual refresh would be a third path to the same thing and one more
+        # thing to forget to press.
+        #
+        # Named "Close window", not "Close": each row's strip now has its own
+        # Close that does nothing but back out of that strip, and two buttons
+        # with the same name on screen at once is a trap.
+        close = Gtk.Button(label="Close window")
+        close.connect("clicked", lambda *_: self.destroy())
+        footer.pack_end(close, False, False, 0)
+        root.pack_start(footer, False, False, 0)
+
+        self.connect("key-press-event", self.on_key)
+
+        # Focus-in is connected but deliberately does nothing -- see
+        # _on_focus_in for why it stopped reloading. It is left wired because
+        # that is the natural place to reintroduce a refresh if one is ever
+        # wanted again.
+        self.connect("focus-in-event", self._on_focus_in)
+        self.reload()
+
+    # ------------------------------------------------------------- rendering
+
+    def reload(self) -> None:
+        """
+        Rebuild the list, grouped by state and sorted by name within each group.
+
+        Sorting is by title, case-insensitively, with untitled sessions last
+        rather than first: an empty string sorts before every letter, which
+        would put the rows with nothing to identify them by at the top of the
+        list.
+
+        The sort is on the title only. `time_updated` is deliberately not a
+        tiebreaker: the store returns sessions most-recent-first, so adding it
+        as a secondary key would reproduce recency ordering for every pair of
+        same-titled sessions, which is not a tie anyone asked to be broken.
+        Titles are not unique, so `id` is the final tiebreaker to keep the order
+        stable across refreshes -- a list that reshuffles on every write is
+        unreadable while you are trying to click one of its rows.
+        """
+        for child in self.listbox.get_children():
+            self.listbox.remove(child)
+
+        data = self.store.list()
+        working = by_name([d for d in data if not d["archived"]])
+        archived = by_name([d for d in data if d["archived"]])
+        self.rows = []
+
+        if not data:
+            lbl = Gtk.Label(label="No sessions found.")
+            lbl.set_margin_top(24)
+            self.listbox.add(lbl)
+            self.status.set_text("Nothing in the database.")
+            self.show_all()
+            return
+
+        if working:
+            self.listbox.add(
+                self._section("UNARCHIVED — right-click one to Archive it")
+            )
+            for d in working:
+                self.listbox.add(self._row(d, archived=False))
+        if archived:
+            self.listbox.add(
+                self._section("ARCHIVED — right-click one to Restore it")
+            )
+            for d in archived:
+                self.listbox.add(self._row(d, archived=True))
+
+        live = sum(1 for d in working if d.get("is_live"))
+        hint = (
+            f"{len(working)} working · {len(archived)} archived  ·  "
+            "right-click a row for its buttons, Close to back out"
+        )
+        if live:
+            hint += "  ·  the THIS SESSION row cannot be archived or deleted"
+        self.status.set_text(hint)
+        # show_all() is safe now: every strip carries set_no_show_all(True), so
+        # this reveals rows and buttons without revealing the hidden strips.
+        self.show_all()
+
+    def _section(self, text: str) -> Gtk.Widget:
+        # Gtk.ListBox wraps a bare label in a row of its own, so a heading is
+        # still a ListBoxRow and would otherwise be picked up as a session.
+        # `is_section` is what tells the two apart everywhere downstream.
+        row = Gtk.ListBoxRow()
+        row.is_section = True
+        row.session_id = None
+        lbl = Gtk.Label(label=text)
+        lbl.get_style_context().add_class("section")
+        lbl.set_xalign(0)
+        lbl.set_margin_top(10)
+        row.add(lbl)
+        row.set_selectable(False)
+        return row
+
+    def _row(self, d: dict, archived: bool) -> Gtk.Widget:
+        row = Gtk.ListBoxRow()
+        row.session_id = d["id"]
+
+        # A GtkListBoxRow is a GtkBin: exactly one child. The row content and
+        # the action strip therefore share a single vertical wrapper, which is
+        # why adding the strip directly to the row would be silently refused.
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        row.add(outer)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box.set_margin_top(5)
+        box.set_margin_bottom(5)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        texts.set_valign(Gtk.Align.CENTER)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Label(label=d["title"] or "(untitled)")
+        title.get_style_context().add_class("title")
+        title.set_xalign(0)
+        title.set_ellipsize(3)
+        # Expands so a long title ellipsizes instead of pushing the ARCHIVED
+        # chip against the text. Without the expand the chip sat immediately
+        # after whatever width the label happened to take.
+        title.set_hexpand(True)
+        title.set_max_width_chars(60)
+        title_box.pack_start(title, True, True, 0)
+        if archived:
+            chip = Gtk.Label(label="ARCHIVED")
+            chip.get_style_context().add_class("chip")
+            chip.set_valign(Gtk.Align.CENTER)
+            title_box.pack_start(chip, False, False, 0)
+        elif d.get("is_live"):
+            # The session you are working in. Marked rather than hidden, so it
+            # is obvious why it behaves differently from the rows around it.
+            chip = Gtk.Label(label="THIS SESSION")
+            chip.get_style_context().add_class("chip-live")
+            chip.set_valign(Gtk.Align.CENTER)
+            chip.set_tooltip_text(
+                "The session currently open in OpenCode. It cannot be archived "
+                "from here, so you cannot archive the conversation you are in."
+            )
+            title_box.pack_start(chip, False, False, 0)
+        texts.pack_start(title_box, False, False, 0)
+
+        msgs = d["messages"] if d["messages"] is not None else "?"
+        bits = [f"{msgs} msg", stamp(d["time_updated"])]
+        if d["directory"]:
+            bits.append(short_dir(d["directory"]))
+        meta = Gtk.Label(label="  ·  ".join(bits))
+        meta.get_style_context().add_class("meta")
+        meta.set_xalign(0)
+        texts.pack_start(meta, False, False, 0)
+
+        ident = Gtk.Label(label=d["id"])
+        ident.get_style_context().add_class("id")
+        ident.set_xalign(0)
+        texts.pack_start(ident, False, False, 0)
+
+        box.pack_start(texts, True, True, 0)
+        outer.pack_start(box, False, False, 0)
+
+        # The action strip sits inside the same row, directly beneath the title,
+        # so the choice is presented against the session it will act on rather
+        # than in a menu that has drifted somewhere else on screen.
+        strip = self._action_strip(d, archived)
+        # no_show_all, not hide(). A plain hide() is undone by every later
+        # show_all() — including the one the window itself makes when it first
+        # maps — which would leave every strip visible on open.
+        strip.set_no_show_all(True)
+        strip.hide()
+        outer.pack_start(strip, False, False, 0)
+        row.actions = strip
+
+        # connect(), not `row.button_press_event = ...`. The attribute form is
+        # not honoured for this signal on this PyGObject, so the click handler
+        # would silently never run and every strip would stay hidden.
+        row.connect("button-press-event", self._on_press)
+        return row
+
+    def _action_strip(self, d: dict, archived: bool) -> Gtk.Widget:
+        """
+        The Archive/Restore choice, inline under the row.
+
+        Built per row so it closes over the session's own id.
+
+        For the live session the strip states plainly that archiving is not
+        allowed, and the button is disabled rather than removed: a missing
+        button reads as a bug, whereas a disabled one with a reason reads as a
+        rule. The write path refuses it too, so the disabled state is not the
+        only thing standing between a click and an archived conversation.
+        """
+        strip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        strip.get_style_context().add_class("actions")
+        strip.set_margin_start(54)
+        strip.set_margin_end(14)
+        strip.set_margin_bottom(6)
+
+        # A FlowBox wraps its children onto a new line when they no longer fit.
+        # That is what keeps Archive/Restore reachable on a half-width tile
+        # instead of clipped past the right edge, which a fixed horizontal box
+        # cannot do -- it either overflows or steals width from its label.
+        # Three per line: six buttons wrap as 3+3 rather than 4+2.
+        buttons = Gtk.FlowBox()
+        buttons.set_selection_mode(Gtk.SelectionMode.NONE)
+        buttons.set_max_children_per_line(3)
+        buttons.set_row_spacing(4)
+        buttons.set_column_spacing(6)
+        # FILL, the default, and left-aligned children.
+        #
+        # The strip used to set halign END on this box, which is what put the
+        # buttons down the right-hand side -- and with only three buttons that
+        # was harmless. `halign` on a FlowBox means "do not expand me, give me
+        # my natural width", and a FlowBox asked for its natural width in a
+        # container that has not been allocated yet computes a single column.
+        # Six buttons then stack one per line and the last one falls off the
+        # bottom of the strip, out of sight.
+        #
+        # Aligning the children to the right instead -- the property that would
+        # actually express the intent -- is not available: `child-alignment` is
+        # absent from this PyGObject binding's property list, and setting it
+        # raises AttributeError rather than being ignored. So the buttons sit
+        # left, under the label, which is also where the eye starts.
+
+        if archived:
+            label = Gtk.Label(label="Restore this session")
+        elif d.get("is_live"):
+            label = Gtk.Label(
+                label="This is the session you are working in - "
+                "archiving it is not allowed from here"
+            )
+        else:
+            label = Gtk.Label(label="Archive this session")
+        label.get_style_context().add_class("actions-label")
+        label.set_xalign(0)
+        label.set_ellipsize(3)  # END
+        strip.pack_start(label, False, False, 0)
+
+        # The primary action leads: it is the one the section heading promised,
+        # and it is inserted first so it sits at the start of the top line.
+        #
+        # Everything below it is the same on both an archived and an unarchived
+        # row, so it is built once here rather than duplicated per branch. The
+        # branches used to carry their own copies of the same four buttons,
+        # which is how "Save .md" came to say ~/Documents in one branch and
+        # nothing at all in the other.
+        if archived:
+            btn = Gtk.Button(label="Restore")
+            btn.get_style_context().add_class("btn-restore")
+            btn.set_tooltip_text(
+                "Clear the archived flag and refresh time_updated, which is "
+                "what makes the session reachable in OpenCode at all.\n\n"
+                "You will still need to restart OpenCode before it appears in "
+                "the app's own session menu -- that list is cached and this "
+                "window cannot refresh it."
+            )
+            btn.connect("clicked", lambda *_: self._act(d["id"], archive=False))
+        else:
+            btn = Gtk.Button(label="Archive")
+            btn.get_style_context().add_class("btn-archive")
+            if d.get("is_live"):
+                btn.set_sensitive(False)
+                btn.get_style_context().add_class("btn-blocked")
+                btn.set_tooltip_text(
+                    "This is the session currently open in OpenCode. Archiving it "
+                    "is not allowed from here, because you are working in it."
+                )
+            else:
+                btn.set_tooltip_text(
+                    "Set time_archived. OpenCode's own UI cannot undo this; "
+                    "this window can."
+                )
+                btn.connect("clicked", lambda *_: self._act(d["id"], archive=True))
+        buttons.insert(btn, -1)
+
+        copy_btn = Gtk.Button(label="Copy id")
+        copy_btn.connect("clicked", lambda *_: self._copy_id(d["id"]))
+        buttons.insert(copy_btn, -1)
+
+        read_btn = Gtk.Button(label="Transcript.md")
+        read_btn.set_tooltip_text(
+            "Write the whole transcript as Markdown to "
+            "~/Downloads/<title>.md, and say where it went.\n\n"
+            "For reading and searching. Two sessions with the same title write "
+            "the same file, so the second replaces the first -- the window says "
+            "so when it happens instead of clobbering quietly."
+        )
+        read_btn.connect("clicked", lambda *_: self._save_transcript(d))
+        buttons.insert(read_btn, -1)
+
+        export_btn = Gtk.Button(label="Export .json")
+        export_btn.set_tooltip_text(
+            "Write OpenCode's own export format to ~/Downloads/<title>.json, "
+            "which `opencode session import` reads back.\n\n"
+            "The only route off this machine. Archive and restore are writes to "
+            "this database and do not exist anywhere else, so a session that "
+            "must outlive this install needs this button."
+        )
+        export_btn.connect("clicked", lambda *_: self._export_json(d))
+        buttons.insert(export_btn, -1)
+
+        delete_btn = Gtk.Button(label="Delete")
+        delete_btn.get_style_context().add_class("btn-delete")
+        if d.get("is_live"):
+            # Same rule as archiving: the conversation you are standing in is
+            # not yours to remove from here.
+            delete_btn.set_sensitive(False)
+            delete_btn.get_style_context().add_class("btn-blocked")
+            delete_btn.set_tooltip_text(
+                "This is the session currently open in OpenCode. Deleting it is "
+                "not allowed from here, because you are working in it."
+            )
+        else:
+            delete_btn.set_tooltip_text(
+                "Remove the session and its messages from the database, after "
+                "asking you to confirm.\n\n"
+                "A backup is taken first, but only the last three are kept, so "
+                "this is close to irreversible. Export .json first if you are "
+                "not sure."
+            )
+            delete_btn.connect("clicked", lambda *_: self._delete_session(d))
+        buttons.insert(delete_btn, -1)
+
+        close_btn = Gtk.Button(label="Close")
+        close_btn.get_style_context().add_class("btn-quiet")
+        close_btn.set_tooltip_text(
+            "Close this strip and do nothing. Same as Escape, or clicking the "
+            "row again -- but it is here rather than only in a keybinding."
+        )
+        close_btn.connect("clicked", lambda *_: self._dismiss())
+        buttons.insert(close_btn, -1)
+
+        strip.pack_start(buttons, False, False, 0)
+        return strip
+
+    def _dismiss(self) -> None:
+        """
+        Close whichever strip is open, without acting on anything.
+
+        Opening a strip costs one right-click and the only ways out were Escape
+        or a second click on the same row, neither of which is offered by the
+        strip itself. So the strip carries its own exit, and this is where all
+        three routes land: the button, Escape, and the toggle on re-click.
+
+        unselect_all() alone is not enough. It does not reliably emit
+        row-selected with None, so the strip is hidden here as well rather than
+        waiting for a signal that may never arrive.
+        """
+        self.listbox.unselect_all()
+        for r in self.listbox.get_children():
+            strip = getattr(r, "actions", None)
+            if strip is not None:
+                strip.hide()
+
+    def _on_press(self, widget, event) -> bool:
+        """
+        Left-click toggles the strip, right-click selects and opens it.
+
+        Both routes exist because finishing with a click on a big button is
+        often easier than finding the right-click spot again.
+        """
+        row = self._row_of(widget)
+        if row is None or getattr(row, "is_section", False):
+            return False
+
+        if event.button == 3:
+            self.listbox.select_row(row)
+            self.listbox.emit("row-selected", row)
+            return True
+
+        if event.button == 1:
+            if self.listbox.get_selected_row() is row:
+                # Re-clicking the open row closes it. _dismiss() hides the strip
+                # as well as unselecting, because unselect_all() does not
+                # reliably emit row-selected with None.
+                self._dismiss()
+            else:
+                self.listbox.select_row(row)
+                self.listbox.emit("row-selected", row)
+            return True
+
+        return False
+
+    def _row_of(self, widget):
+        while widget is not None and not isinstance(widget, Gtk.ListBoxRow):
+            widget = widget.get_parent()
+        return widget
+
+    def _on_row_selected(self, _listbox, row) -> None:
+        """
+        Show exactly one strip — the selected row's.
+
+        `show_all()` alone is not enough: the strip carries
+        set_no_show_all(True) so that the window's own show_all() cannot reveal
+        it, and that flag also suppresses this call. So the flag is lifted for
+        the reveal and re-applied afterwards, otherwise the strip would stay
+        hidden for the rest of the window's life once shown.
+        """
+        if row is None:
+            return
+        for r in self.listbox.get_children():
+            strip = getattr(r, "actions", None)
+            if strip is None:
+                continue
+            if r is row:
+                strip.set_no_show_all(False)
+                strip.show_all()
+                strip.set_no_show_all(True)
+            else:
+                strip.hide()
+
+    # ------------------------------------------------------------- behaviour
+
+    def _act(self, session_id: str, archive: bool) -> None:
+        """Do the write, then rebuild so the grouping is never stale."""
+        verb = "Archiving" if archive else "Restoring"
+        try:
+            res = self.store.set_archived([session_id], archive)
+        except sqlite3.Error as err:
+            self._toast(f"{verb} failed: {err}", error=True)
+            return
+
+        if res["changed"]:
+            # Re-read from the database rather than patching the rows in place.
+            # The session just moved between sections, so the list is rebuilt
+            # from what was actually written and the write is announced.
+            self.reload()
+            backup = res["backup"].name if res["backup"] else "none"
+            self.status.set_text(
+                f"{'Archived' if archive else 'Restored'}: "
+                f"{data_title(session_id, self.store)}  ·  backup {backup}"
+            )
+        else:
+            detail = res["errors"][0] if res["errors"] else "no rows changed"
+            self._toast(f"{verb} did nothing: {detail}", error=True)
+
+    def _on_focus_in(self, *_args) -> bool:
+        """
+        Deliberately does nothing.
+
+        This used to reload the database on every focus-in, to catch writes made
+        elsewhere -- by the agent, the plugin, or OpenCode's own UI. It was
+        removed because reload() ends in show_all(), which re-maps the widgets
+        and can shift focus, which fires focus-in again. That is a feedback
+        loop, and it showed as the window re-rendering continuously.
+
+        It was also solving the wrong problem. The staleness that mattered was in the
+        desktop app's own session list, which no code in this window can
+        refresh -- see the note in the banner. This window's list is correct:
+        it reloads after every write it makes, and re-reads the database on
+        launch. A window left open across someone else's write shows that write
+        on the next archive, restore, or reopen.
+        """
+        return False
+
+    def _toast(self, text: str, error: bool = False) -> None:
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.ERROR if error else Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text=text,
+        )
+        dlg.connect("response", lambda w, *_: w.destroy())
+        dlg.show_all()
+
+    def _copy_id(self, session_id: str) -> None:
+        clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clip.set_text(session_id, -1)
+        clip.store()
+        self.status.set_text(f"Copied {session_id}")
+
+    def _save_transcript(self, data: dict) -> None:
+        """
+        Write the full transcript to ~/Downloads/<session_name>.md
+
+        The path is reported in the status line and in the confirmation, because
+        a save you cannot find is not much of a save. ~/Downloads rather than
+        ~/Documents because that is where a file is wanted afterwards, not
+        worked on.
+
+        The filename is slugified from the title, and two sessions sharing a
+        title therefore write the same file -- the second overwrites the first.
+        That is flagged in the confirmation when it happens rather than silently
+        clobbering, since losing a transcript to a name collision is exactly
+        the failure this button is meant to prevent.
+        """
+        try:
+            text = read_transcript(self.store, data["id"])
+        except Exception as err:  # noqa: BLE001 - surfaced to the user
+            self._toast(f"Could not read transcript: {err}", error=True)
+            return
+
+        out_dir = self._out_dir()
+        target = out_dir / f"{slug_of(data['title'])}.md"
+
+        header = (
+            f"# {data['title'] or '(untitled)'}\n\n"
+            f"- session: `{data['id']}`\n"
+            f"- directory: `{data['directory'] or '-'}`\n"
+            f"- updated: {stamp(data['time_updated'])}\n"
+            f"- messages: {data['messages'] if data['messages'] is not None else '?'}\n"
+            f"- archived: {'yes' if data['archived'] else 'no'}\n\n---\n\n"
+        )
+        existed = target.exists()
+        target.write_text(header + text, encoding="utf8")
+
+        shown = short_home(target)
+        if existed:
+            # The previous transcript of a same-titled session is gone. Say so
+            # rather than leaving the user to find out later.
+            self.status.set_text(f"Overwrote {shown}")
+            self._toast(
+                f"Overwrote {shown}\n\nAnother session already had this title, "
+                "so its transcript was replaced. Rename one of them first if "
+                "you need to keep both."
+            )
+        else:
+            self.status.set_text(f"Saved {shown}")
+
+    def _export_json(self, data: dict) -> None:
+        """
+        Write OpenCode's own JSON export to ~/Downloads/<title>.json.
+
+        Archive and restore are direct writes to this database, so they work
+        only on this machine. This is the one export that leaves: the file is
+        what `opencode session import` reads back, on this machine or another.
+
+        The payload comes from `opencode session export` rather than from
+        hand-assembling JSON here. The import format is the CLI's to define, it
+        has already changed between releases, and a guess at it that is one
+        field out produces a file that imports to an empty session -- which is
+        worse than no export, because it looks like it worked.
+
+        Exported to a temporary file first and moved into place, so a session
+        that fails halfway does not leave a truncated .json sitting in
+        Downloads looking importable.
+        """
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb", suffix=".json", dir=self._out_dir(), delete=False
+            ) as handle:
+                tmp = Path(handle.name)
+                proc = subprocess.run(
+                    ["opencode", "session", "export", data["id"]],
+                    stdout=handle,
+                    stderr=subprocess.PIPE,
+                    timeout=300,
+                    check=False,
+                )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    proc.stderr.decode("utf8", "replace").strip()
+                    or f"opencode exited {proc.returncode}"
+                )
+
+            target = self._out_dir() / f"{slug_of(data['title'])}.json"
+            target.write_bytes(tmp.read_bytes())
+        except subprocess.TimeoutExpired:
+            self._toast("Export timed out after 5 minutes. Nothing was written.", error=True)
+            return
+        except Exception as err:  # noqa: BLE001 - surfaced to the user
+            self._toast(f"Could not export session: {err}", error=True)
+            return
+        finally:
+            if tmp is not None and tmp.exists():
+                tmp.unlink(missing_ok=True)
+
+        self.status.set_text(f"Exported {short_home(target)}")
+        self._toast(
+            f"Exported {short_home(target)}\n\n"
+            "Bring it back with:\n"
+            f"    opencode session import {short_home(target)}"
+        )
+
+    def _out_dir(self) -> Path:
+        """Where exports and transcripts land: ~/Downloads, created on demand."""
+        out = Path.home() / "Downloads"
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def _delete_session(self, data: dict) -> None:
+        """
+        Delete the session permanently, after an explicit confirmation.
+
+        Deletion is the one action here with no way back: archiving is
+        reversible from this window, saving leaves a copy elsewhere, and this
+        removes the rows. So it asks first, names the session it is about to
+        remove, and defaults to Cancel.
+
+        The suggestion -- archive instead -- is on the dialog because the
+        reversible action is almost always what was meant, and a confirmation
+        that only offers the destructive choice is a confirmation that will be
+        reflexively accepted.
+        """
+        title = data["title"] or "(untitled)"
+        messages = data["messages"]
+        count = f"{messages} messages" if messages is not None else "unknown number of messages"
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Permanently delete this session?\n\n{title}\n{count}",
+        )
+        cancel = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        archive = dialog.add_button("Archive instead", RESP_ARCHIVE_INSTEAD)
+        delete = dialog.add_button("Delete", RESP_DELETE)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        # Focus Cancel, not Delete: Enter should never be the destructive path.
+        dialog.set_focus(cancel)
+        dialog.connect("response", self._on_delete_response, data)
+        dialog.show_all()
+
+    def _on_delete_response(self, dialog, response: int, data: dict) -> None:
+        dialog.destroy()
+        if response == RESP_ARCHIVE_INSTEAD:
+            # Archive instead: reversible, and does the same tidying job.
+            self._act(data["id"], archive=True)
+            return
+        if response != RESP_DELETE:
+            return
+
+        try:
+            removed = delete_session(self.store, data["id"])
+        except Exception as err:  # noqa: BLE001 - surfaced to the user
+            self._toast(f"Could not delete session: {err}", error=True)
+            return
+
+        if removed:
+            self.reload()
+            self.status.set_text(f"Deleted {data['title'] or data['id']}")
+        else:
+            self._toast("Nothing was deleted.", error=True)
+
+    def on_key(self, _widget, event) -> bool:
+        if event.keyval == Gdk.KEY_F5:
+            # Kept as an undocumented convenience even though there is no
+            # Refresh button. Harmless, and useful when debugging a stale read.
+            self.reload()
+            return True
+        if event.keyval == Gdk.KEY_Escape:
+            row = self.listbox.get_selected_row()
+            if row is not None:
+                # First Escape closes the action strip, second closes the window.
+                self._dismiss()
+                return True
+            self.destroy()
+            return True
+        return False
+
+
+def data_title(session_id: str, store: Store) -> str:
+    for d in store.list():
+        if d["id"] == session_id:
+            return d["title"] or "(untitled)"
+    return session_id
+
+
+def delete_session(store: Store, session_id: str) -> bool:
+    """
+    Remove one session and every row that belongs to it. True if it went.
+
+    This is the only operation in this window without a way back: archiving is
+    reversible here, saving and exporting leave a file elsewhere, and this
+    deletes. So it snapshots first, and it deletes in one transaction -- either
+    the session and all of its messages go, or none of it does. A half-deleted
+    session, with a title in the list and no conversation under it, would be
+    worse than either outcome.
+
+    Which tables are touched is discovered rather than assumed: every table
+    carrying a `session_id` column, which is how session data is keyed
+    throughout this schema. A table without that column is left alone even if
+    it plausibly belongs to the session -- `event` is keyed by `aggregate_id`
+    and belongs to the running server, and guessing at its contents is how a
+    delete turns into data loss somewhere else.
+
+    The live session is refused here, not only by a disabled button, on the
+    same reasoning as archiving: you cannot remove the conversation you are
+    standing in from a window that is part of it.
+
+    Both refusals -- live session, unknown id -- are checked BEFORE the
+    snapshot. Snapshotting first meant every refused delete still consumed one
+    of the three retained backups, so three refusals would push out the very
+    snapshot that holds the session a real delete removed. The checks are
+    repeated inside the write transaction, since VACUUM INTO cannot run inside
+    one and the state could change in between.
+    """
+    db = store._connect()  # noqa: SLF001 - same module family
+    try:
+        db.execute("PRAGMA busy_timeout = 15000")
+        if store._is_live(db, session_id):  # noqa: SLF001 - same module family
+            raise ValueError(
+                "this is the session currently open in OpenCode, and "
+                "cannot be deleted from here"
+            )
+        if db.execute(f"SELECT 1 FROM {store.table} WHERE id = ?", (session_id,)).fetchone() is None:
+            return False
+
+        have = {
+            r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        targets = []
+        for table in sorted(have):
+            if not table.replace("_", "").isalnum():
+                continue  # a quoted or odd name is not worth the risk
+            cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+            if "session_id" in cols or table == store.table:
+                targets.append(table)
+    finally:
+        db.close()
+
+    store.backup()
+
+    db = store._connect()  # noqa: SLF001 - same module family
+    try:
+        db.execute("PRAGMA busy_timeout = 15000")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-checked inside the transaction: the snapshot took time, and
+            # this is the write that actually happens.
+            if store._is_live(db, session_id):  # noqa: SLF001 - same module family
+                raise ValueError(
+                    "this is the session currently open in OpenCode, and "
+                    "cannot be deleted from here"
+                )
+            row = db.execute(
+                f"SELECT 1 FROM {store.table} WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                db.execute("ROLLBACK")
+                return False
+
+            removed = 0
+            # Children first. There are no foreign keys declared here, but the
+            # order keeps this correct if a future release adds them.
+            for table in [t for t in targets if t != store.table]:
+                cur = db.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
+                removed += cur.rowcount
+            cur = db.execute(f"DELETE FROM {store.table} WHERE id = ?", (session_id,))
+            removed += cur.rowcount
+            db.execute("COMMIT")
+            return removed > 0
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
+    finally:
+        db.close()
+
+
+def read_transcript(store: Store, session_id: str, limit: int = 0) -> str:
+    """
+    Pull displayable text out of a session, oldest first.
+
+    Message payloads differ by type and have changed shape between releases, so
+    this is forgiving on purpose: anything unrecognised is skipped rather than
+    raising, because a partial transcript still tells you what was discussed.
+    """
+    db = store._connect()  # noqa: SLF001 - same module family
+    try:
+        have = {
+            r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        table = next((t for t in ("session_message", "message") if t in have), None)
+        if not table:
+            return "(no message table)"
+        cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        if "session_id" not in cols:
+            return "(no session_id column)"
+
+        order = "seq ASC" if "seq" in cols else (
+            "time_created ASC" if "time_created" in cols else "rowid ASC"
+        )
+        type_col = "type" if "type" in cols else "''"
+
+        out = []
+        for mtype, raw in db.execute(
+            f"SELECT {type_col}, data FROM {table} WHERE session_id = ? ORDER BY {order}",
+            (session_id,),
+        ):
+            import json
+
+            try:
+                parsed = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            text = ""
+            if mtype == "user":
+                meta = parsed.get("metadata") or {}
+                text = meta.get("displayText") or parsed.get("text") or ""
+            elif mtype == "assistant":
+                parts = parsed.get("content") or []
+                text = "\n\n".join(
+                    p.get("text", "") for p in parts if p.get("type") == "text"
+                )
+            elif mtype == "synthetic":
+                text = parsed.get("text") or ""
+            text = (text or "").strip()
+            if text:
+                label = {"user": "You", "assistant": "Assistant"}.get(mtype, mtype)
+                out.append(f"### {label}\n\n{text}")
+
+        body = "\n\n".join(out)
+        return body if limit <= 0 else body[-limit:]
+    finally:
+        db.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="OpenCode session inventory")
+    ap.add_argument("--copy", action="store_true", help="print to stdout, no window")
+    ap.add_argument("--db", help="path to opencode.db (default: the real one)")
+    args = ap.parse_args()
+
+    store = Store(Path(args.db) if args.db else default_db())
+
+    if args.copy:
+        print(plain_text(store))
+        return 0
+
+    win = Window(store)
+    win.show_all()
+
+    # Belt and braces around Gtk.main()'s own exit-when-last-window-closes rule.
+    #
+    # That rule did not always fire: instances were surviving with no window
+    # mapped, invisible but still running, and they stacked up one per launch
+    # until they had to be killed by hand. So the main loop is driven explicitly
+    # and quit from the destroy handler, and a watchdog exits the process if the
+    # loop somehow outlives the window. A popup that cannot be closed is worse
+    # than one that re-reads a little lazily.
+    def quit_loop(*_args) -> bool:
+        if Gtk.main_level() > 0:
+            Gtk.main_quit()
+        return False
+
+    win.connect("destroy", quit_loop)
+
+    def watchdog() -> bool:
+        if not win.get_visible() and Gtk.main_level() > 0:
+            Gtk.main_quit()
+        return True
+
+    GLib.timeout_add(2000, watchdog)
+
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
