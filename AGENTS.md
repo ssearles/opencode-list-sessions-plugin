@@ -54,16 +54,54 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 ## Commands (slash — must be typed, see the palette note below)
 | Command | Purpose |
 |---------|---------|
-| `/list_sessions` | Every session — working first, then archived, full ids, **unnumbered** |
-| `/archive_Put [num \| id \| title]` | Archive a current session — bare form prints a numbered menu |
-| `/archive_Pull [num \| id \| title]` | Restore an archived session — bare form prints a numbered menu |
-| `/save [path.md]` | Write the session to Markdown, default `~/Documents/<title>.md` |
+| `/list_sessions` | Opens the session popup window; `--text` prints the list instead |
+| `/save [path.md]` | Write the session to Markdown, default `~/Downloads/<title>.md` |
+
+**`/archive_Put` and `/archive_Pull` were removed.** Archiving, restoring,
+deleting, transcript and JSON export all moved into the popup window
+(`~/.local/bin/session-list-popup`), because they are click targets rather than
+things worth typing, and because a plugin cannot present a menu the desktop app
+will render — see "Why There Is No Dropdown" below. The `session_archive` tools
+are unchanged: archive and restore are still agent-callable.
 
 `/save` takes an explicit output path when the argument ends in `.md`, so
 `/save ~/Desktop/today.md` works unconfigured. Otherwise the filename is the
 session's own title, slugified — **two sessions sharing a title will overwrite
 each other**, which is why the explicit form exists. Override the default folder
 with `OPENCODE_TRANSCRIPT_DIR`.
+
+## The Popup Window
+`~/.local/bin/session-list-popup`, a Python/GTK3 script that reads and writes
+the same database directly. Right-click a row to open its strip:
+
+| Button | Does |
+|--------|------|
+| Archive / Restore | The primary action; disabled on the session you are working in |
+| Copy id | The session id, for handing to the CLI |
+| Transcript.md | Full transcript to `~/Downloads/<title>.md` |
+| Export .json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
+| Delete | Removes the session, after a dialog defaulting to Cancel |
+| Close | Nothing at all |
+
+Three things about it that are easy to get wrong:
+
+- **The desktop app's session menu cannot be refreshed from here.** It caches
+  its list and no event re-fetches it. A rename-based resync through the
+  server's API was tried and verified twice against the running server: the
+  server accepted it and the client never applied it. The window states the
+  restart requirement in its own banner instead.
+- **Do not reconnect `focus-in-event` to `reload()`.** `reload()` ends in
+  `show_all()`, which can shift focus, which fires `focus-in-event` again. That
+  feedback loop showed as continuous blinking. `_on_focus_in` is now a no-op
+  and `test-popup-gui.py` asserts 20 focus-ins cause zero reloads.
+- **`Export .json` shells out to the CLI rather than building the payload.** The
+  import format is the CLI's to define and has changed between releases; a
+  hand-assembled payload that is one field out imports to an empty session,
+  which is worse than no export because it looks like it worked.
+
+Tests live in `/tmp/opencode/`: `test-popup-gui.py`, `test-popup-writes.py`,
+`test-popup-lifecycle.py`. All three work on `VACUUM INTO` copies and assert the
+real database is unchanged.
 
 ## Tools (agent-callable, namespace `session_archive`)
 | Tool | Purpose |

@@ -13,20 +13,23 @@
 
 import { ArchiveError, SessionStore, type SessionRow } from "./src/db.ts"
 import { slug, toMarkdown } from "./src/markdown.ts"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
 /**
  * Where `/save` writes by default. Override with OPENCODE_TRANSCRIPT_DIR.
  *
- * ~/Documents rather than a plugin-owned folder, so the file is recognisable in
- * a file manager without the user having to know where a plugin keeps things.
+ * ~/Downloads rather than a plugin-owned folder, so the file is recognisable in
+ * a file manager without the user having to know where a plugin keeps things --
+ * and the same folder the popup window's Transcript.md button writes to, so
+ * there is one place transcripts land instead of two depending on which one you
+ * used.
  */
 function transcriptDir(): string {
   const custom = process.env.OPENCODE_TRANSCRIPT_DIR
   if (custom) return custom
-  return join(homedir(), "Documents")
+  return join(homedir(), "Downloads")
 }
 
 /**
@@ -83,6 +86,54 @@ interface PluginContext {
 
 /** Sessions loaded per plugin instance. */
 const store = () => SessionStore.open()
+
+/**
+ * Where the popup window lives, and how to launch it.
+ *
+ * ~/.local/bin is on PATH on a stock install, so the bare name is tried first
+ * and the absolute path is the fallback. Both are checked for existence before
+ * anything is spawned, because a spawn that fails asynchronously looks exactly
+ * like a window that never opened — and the report then blames the window
+ * rather than the missing file.
+ */
+function popupCommand(): { bin: string; args: string[] } | { error: string } {
+  const candidates = [join(homedir(), ".local", "bin", "session-list-popup")]
+  const onPath = process.env.PATH ?? ""
+  if (onPath.split(":").includes(join(homedir(), ".local", "bin"))) {
+    candidates.unshift("session-list-popup")
+  }
+
+  for (const bin of candidates) {
+    const absolute = bin.includes("/") ? bin : join(homedir(), ".local", "bin", bin)
+    if (existsSync(absolute)) return { bin, args: [] }
+  }
+  return { error: `session-list-popup not found (looked in ~/.local/bin)` }
+}
+
+/**
+ * Launch the popup, detached from this process.
+ *
+ * `detached: true` plus `unref()` matters: without it the window is a child of
+ * the OpenCode server, and closing the app that ran the command takes the window
+ * with it. `setsid` is belt-and-braces for the same reason.
+ */
+function openPopup(): { ok: true } | { ok: false; reason: string } {
+  const found = popupCommand()
+  if ("error" in found) return { ok: false, reason: found.error }
+
+  try {
+    // Imported lazily so a plugin load never fails on a missing builtin.
+    const { spawn } = require("node:child_process") as typeof import("node:child_process")
+    const child = spawn("setsid", [found.bin, ...found.args], {
+      detached: true,
+      stdio: "ignore",
+    })
+    child.unref()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+}
 
 function shortId(id: string): string {
   return id.length > 20 ? `${id.slice(0, 20)}…` : id
@@ -276,12 +327,37 @@ function menu(
  * The state is carried by the section heading (Working / Archived) rather than
  * repeated on every row, since a row is only ever in one section.
  */
+/**
+ * Order session rows by title, the way both listings now present them.
+ *
+ * Case-insensitive, so "apple" and "Banana" file under one alphabet rather than
+ * two. Untitled sessions sort last: an empty title would otherwise beat every
+ * real one and put the least identifiable rows at the top. `id` breaks the last
+ * tie, because titles repeat and a list that reshuffles itself on every write is
+ * unreadable while you are reaching for a row in it.
+ *
+ * This is display order only. `SessionStore.list()` still returns
+ * `time_updated DESC`, which is what OpenCode itself uses and what restoring
+ * depends on to resurface an archived session.
+ */
+function byName(rows: SessionRow[]): SessionRow[] {
+  return [...rows].sort((a, b) => {
+    const at = (a.title ?? "").trim()
+    const bt = (b.title ?? "").trim()
+    if (at === "" && bt !== "") return 1
+    if (bt === "" && at !== "") return -1
+    const byText = at.toLowerCase().localeCompare(bt.toLowerCase())
+    return byText !== 0 ? byText : a.id.localeCompare(b.id)
+  })
+}
+
 function inventoryRow(r: SessionRow): string {
   const msgs = r.messages === null ? "?" : r.messages
   const dir = r.directory ? shortDir(r.directory) : ""
   const bits = [`${msgs} msg`, when(r.updated)]
   if (dir) bits.push(dir)
-  return `  ${r.title}\n      ${r.id}  ·  ${bits.join(" · ")}`
+  const state = r.archived ? "archived · Restore" : "unarchived · Archive"
+  return `  ${r.title}\n      ${r.id}  ·  ${bits.join(" · ")}  ·  ${state}`
 }
 
 /**
@@ -289,25 +365,32 @@ function inventoryRow(r: SessionRow): string {
  *
  * A read-only reference rather than a numbered menu, and deliberately
  * unnumbered. Every line carries its full session id so a row can be selected
- * with the mouse and pasted straight into `/archive_Put`, `/archive_Pull` or
- * `/session`.
+ * with the mouse and acted on in the popup window.
  *
- * Numbering is omitted on purpose: the two write commands count different
- * subsets (`/archive_Put` numbers current only, `/archive_Pull` numbers
- * archived only), so one shared numbering would match neither menu once either
- * group changed size. Copying an id is unambiguous, where a remembered number
- * would not.
+ * Numbering is omitted on purpose: every action is a click on a button, so a
+ * number in front of a row was a position the reader had to hold in their head
+ * and had no way to use. Copying an id is unambiguous, where a remembered number
+ * would not be.
+ *
+ * Rows are sorted by title within each section, matching the popup window.
+ * `SessionStore.list()` returns most-recent-first, which is right for
+ * OpenCode but made the window's order jump about under the pointer; a list
+ * sorted by name stays where you put it.
+ *
+ * The two sections are ordered unarchived-then-archived because that is also
+ * the order the popup window groups them in, and because the state decides the
+ * action available: a session cannot be archived twice or restored before it is
+ * archived. Each heading says which.
  *
  * This was briefly split into `/list_Current` and `/list_Archived` and put back.
  * Splitting it lost the only single-screen view of both halves, and gained
- * nothing: the numbered menus were always available by running `/archive_Put` or
- * `/archive_Pull` with no argument.
+ * nothing.
  */
 function inventory(all: SessionRow[], limit = 60): string {
   if (all.length === 0) return "No sessions found."
 
-  const working = all.filter((r) => !r.archived)
-  const archived = all.filter((r) => r.archived)
+  const working = byName(all.filter((r) => !r.archived))
+  const archived = byName(all.filter((r) => r.archived))
 
   const block = (heading: string, rows: SessionRow[]) => {
     if (rows.length === 0) return [`**${heading}**`, "", "_none_"]
@@ -321,8 +404,12 @@ function inventory(all: SessionRow[], limit = 60): string {
   }
 
   const sections: string[] = []
-  if (working.length) sections.push(block("Working — current", working).join("\n"))
-  if (archived.length) sections.push(block("Archived", archived).join("\n"))
+  // The heading names the action that applies to its rows, not just the state.
+  // "Working — current" said what a session was but not what could be done to
+  // it, and with the archive commands gone this list is the only place a user
+  // is told where archiving happens.
+  if (working.length) sections.push(block("Unarchived — Archive from the popup window", working).join("\n"))
+  if (archived.length) sections.push(block("Archived — Restore from the popup window", archived).join("\n"))
 
   const hidden = all.length > limit * 2 ? ["", "Some sessions were omitted."] : []
 
@@ -330,7 +417,8 @@ function inventory(all: SessionRow[], limit = 60): string {
     ...sections,
     ...hidden,
     "",
-    "Copy a line's id into `/archive_Put <id>` or `/archive_Pull <id>`.",
+    "Archive and restore from the `session-list-popup` window: right-click a",
+      "session there for an Archive or Restore button on it.",
   ].join("\n\n")
 }
 
@@ -531,150 +619,64 @@ export default {
     await ctx.command.transform((editor) => {
       editor.add({
         name: "list_sessions",
-        description: "List every session — working first, then archived — with copyable ids",
-        execute: async ({ sessionID }) => {
-          try {
-            const s = await store()
-            await say(sessionID, inventory(await s.list()))
-          } catch (err) {
-            await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        },
-      })
-
-      editor.add({
-        name: "archive_Put",
-        description: "Archive a current session by number, id or title",
+        description:
+          "Open the session popup window — unarchived first, then archived, " +
+          "with Archive, Restore, Transcript.md, Export .json and Delete on " +
+          "each row",
         execute: async ({ sessionID, prompt }) => {
           try {
-            const s = await store()
-            const args = parseArgs(prompt?.text)
-
-            // No argument: show the current sessions as a numbered menu. This is
-            // the default rather than archiving the session in play, because
-            // that is never what someone means when they open the command list.
-            if (args.length === 0) {
-              const open = await s.list({ archived: "active" })
-              await say(
-                sessionID,
-                menu(open, {
-                  heading: "Current sessions",
-                  empty: "No current sessions to archive.",
-                  action: "Archive one with `/archive_Put <number>`, or name it directly.",
-                }),
-              )
+            // `/list_sessions --text` keeps the old behaviour of printing the
+            // inventory into the conversation, for when a window is not wanted
+            // or will not open — over SSH, or on a machine with no GTK.
+            if (parseArgs(prompt?.text).includes("--text")) {
+              const s = await store()
+              await say(sessionID, inventory(await s.list()))
               return
             }
-            const open = await s.list({ archived: "active" })
-            const { ids, ambiguous, outOfRange } = await pickByNumber(args, open, s)
-
-            if (outOfRange.length > 0) {
-              await say(
-                sessionID,
-                rangeMessage(outOfRange, open.length, "archived", "/archive_Put"),
-              )
-              return
-            }
-            if (ambiguous) {
-              await say(
-                sessionID,
-                `"${args.join(" ")}" matched more than one session, so nothing was archived.`,
-              )
-              return
-            }
-            if (ids.length === 0) {
-              await say(
-                sessionID,
-                `Nothing matched "${args.join(" ")}", so nothing was archived. ` +
-                  "Run `/list_sessions` to see them, or name one exactly.",
-              )
-              return
-            }
-            const { changed, errors, backup } = await s.archive(ids)
-            const lines = [`Archived ${changed.length} session(s).`]
-            for (const c of changed) lines.push(`  ${shortId(c)}`)
-            if (errors.length) lines.push("", "Failed:", ...errors.map((e) => `  ${e}`))
-            lines.push("", `Backup: ${backup}`)
-            if (ids.includes(sessionID)) lines.push("", `This session (${shortId(sessionID)}) is now archived.`)
-            lines.push(REMINDER)
-            await say(sessionID, lines.join("\n"))
-          } catch (err) {
-            await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        },
-      })
-
-
-      editor.add({
-        name: "archive_Pull",
-        description: "Restore an archived session by number, id or title",
-        execute: async ({ sessionID, prompt }) => {
-          try {
-            const s = await store()
-            const args = parseArgs(prompt?.text)
-            const rows = await s.list({ archived: "only" })
-
-            if (args.length === 0) {
-              await say(
-                sessionID,
-                menu(rows, {
-                  heading: "Archived sessions",
-                  empty: "No archived sessions.",
-                  action: "Restore one with `/archive_Pull <number>`, or name it directly.",
-                }),
-              )
-              return
-            }
-            const { ids, ambiguous, outOfRange } = await pickByNumber(args, rows, s)
-            if (outOfRange.length > 0) {
-              await say(
-                sessionID,
-                rangeMessage(outOfRange, rows.length, "restored", "/archive_Pull"),
-              )
-              return
-            }
-            if (ambiguous) {
-              await say(
-                sessionID,
-                [
-                  `The term "${args.join(" ")}" matched more than one session, ` +
-                    "so nothing was restored.",
-                  "",
-                  "Name one by number from the list, or use a more specific phrase.",
-                ].join("\n"),
-              )
-              return
-            }
-            if (ids.length === 0) {
-              await say(
-                sessionID,
-                `Nothing matched "${args.join(" ")}", so nothing was restored. ` +
-                  "Run `/list_sessions` to see them.",
-              )
-              return
-            }
-            const { changed, errors, backup } = await s.unarchive(ids)
-            const lines = [`Restored ${changed.length} session(s).`]
-            for (const c of changed) {
-              const row = await s.get(c)
-              lines.push(`  ${shortId(c)}  → ${row?.directory || "(unknown directory)"}`)
-            }
-            if (errors.length) lines.push("", "Failed:", ...errors.map((e) => `  ${e}`))
-            lines.push(
-              "",
-              "Restored sessions are listed under their original project folder and",
-              "sort to the top of that folder's recent list.",
-              "",
-              `Backup: ${backup}`,
-              REMINDER,
+            const launched = openPopup()
+            await say(
+              sessionID,
+              launched.ok
+                ? [
+                    "Opened the session popup window.",
+                    "",
+                    "Right-click a session there to get its buttons: Archive " +
+                      "or Restore, Transcript.md, Export .json, Delete, and " +
+                      "Close to back out without doing anything. Unarchived " +
+                      "sessions are listed first, each section sorted by name.",
+                    "",
+                    "`/list_sessions --text` prints the same list as text instead.",
+                  ].join("\n")
+                : [
+                    `Could not open the popup window: ${launched.reason}`,
+                    "",
+                    "Printing the list as text instead. Archive, restore, delete and " +
+                      "export are in the popup window when it is available; " +
+                      "`/save` and the `session_archive` tools still work " +
+                      "without it.",
+                    "",
+                    inventory(await (await store()).list()),
+                  ].join("\n"),
             )
-            await say(sessionID, lines.join("\n"))
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
       })
     })
+
+    // /archive_Put and /archive_Pull were removed as commands.
+    //
+    // Archiving and restoring moved to `session-list-popup`, a standalone GTK
+    // window that archives on right-click. The numbered text menus existed only
+    // because OpenCode exposes no picker to a plugin — the TUI bus carries just
+    // command.execute, prompt.append, session.select and toast.show, and a
+    // plugin context has event.subscribe with no publish. A real window removes
+    // that constraint entirely, and with it the off-by-one risk that typing a
+    // stale number into a menu caused.
+    //
+    // `SessionStore.archive` / `.unarchive` are untouched and still back the
+    // `session_archive` tools below, so the agent can still archive on request.
 
     /**
      * `/save` — write the session out as readable Markdown.

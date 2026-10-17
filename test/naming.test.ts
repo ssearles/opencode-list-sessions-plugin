@@ -57,11 +57,23 @@ describe("command names in text", () => {
   it("finds the registered commands (guard on the extraction itself)", () => {
     // If this fails, the extraction above is broken and every other assertion
     // in this file would pass vacuously.
-    for (const expected of ["list_sessions", "archive_Put", "archive_Pull", "save"]) {
+    for (const expected of ["list_sessions", "save"]) {
       assert.ok(
         REGISTERED.includes(expected),
         `expected to find the /${expected} command in the source; extraction found ` +
           `[${REGISTERED.join(", ")}]`,
+      )
+    }
+  })
+
+  it("registers no archiving command, which now lives in the popup window", () => {
+    // Archive and restore moved to `session-list-popup`. Re-registering them
+    // here would put two competing archive paths back in the palette, one of
+    // which cannot restore anything the other archived.
+    for (const gone of ["archive_Put", "archive_Pull"]) {
+      assert.ok(
+        !REGISTERED.includes(gone),
+        `/${gone} is registered as a command again; archiving belongs in the popup`,
       )
     }
   })
@@ -84,7 +96,14 @@ describe("command names in text", () => {
     // `session_archive` namespace — a separate registry, so their presence here
     // says nothing about the command of the same name. `list` is a core tool
     // name and was never a command here either.
-    for (const removed of ["session", "list_Current", "list_Archived", "list"]) {
+    for (const removed of [
+      "session",
+      "list_Current",
+      "list_Archived",
+      "list",
+      "archive_Put",
+      "archive_Pull",
+    ]) {
       assert.ok(
         !REGISTERED.includes(removed),
         `/${removed} was removed but is registered as a command again`,

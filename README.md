@@ -96,11 +96,14 @@ matters more for `/archive_Pull`, which is a write.
 
 ### `/save`
 
-Output defaults to `~/Documents/<session title>.md`, named from the session's own
+Output defaults to `~/Downloads/<session title>.md`, named from the session's own
 title read at run time. Set `OPENCODE_TRANSCRIPT_DIR` to change the folder.
 
+`~/Downloads` is the same folder the popup window's **Transcript.md** button
+writes to, so there is one place transcripts land whichever tool you use.
+
 ```
-/save                  →  ~/Documents/archiving-older-ai-conversations.md
+/save                  →  ~/Downloads/archiving-older-ai-conversations.md
 /save ~/Desktop/today.md
 ```
 

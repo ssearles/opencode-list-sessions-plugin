@@ -137,16 +137,69 @@ describe("prompt text parsing", () => {
 })
 
 describe("/list inventory", () => {
-  it("puts working sessions before archived ones", async () => {
+  it("sorts rows by title within each section", async () => {
+    // The store returns time_updated DESC. Both listings now sort by name, so
+    // the order the reader sees does not move when a session is written to.
+    const out = __inventory(await rows())
+    const [working, archived] = out.split("**Archived")
+    // Title lines are indented by exactly two spaces; the id line under each
+    // is indented five. Anchoring on the third character keeps the ids out.
+    const titles = (block: string) =>
+      [...block.matchAll(/^ {2}[^ ].*$/gm)].map((m) => m[0].trim())
+
+    for (const [name, block] of [["Unarchived", working], ["Archived", archived]] as const) {
+      const got = titles(block)
+      assert.ok(got.length > 1, `${name} needs at least two rows to test order`)
+      const sorted = [...got].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+      assert.deepEqual(got, sorted, `${name} section must be alphabetical by title`)
+    }
+  })
+
+  it("puts unarchived sessions before archived ones", async () => {
     const out = __inventory(await rows())
     // The state lives in the section heading now, so match the heading prefix
-    // rather than the old "**Working**" exactly.
-    const workingAt = out.indexOf("**Working")
-    const archivedAt = out.indexOf("**Archived**")
+    // rather than an exact string.
+    const unarchivedAt = out.indexOf("**Unarchived")
+    const archivedAt = out.indexOf("**Archived")
 
-    assert.ok(workingAt !== -1, "missing a Working section")
+    assert.ok(unarchivedAt !== -1, "missing an Unarchived section")
     assert.ok(archivedAt !== -1, "missing an Archived section")
-    assert.ok(workingAt < archivedAt, "working sessions must come first")
+    assert.ok(unarchivedAt < archivedAt, "unarchived sessions must come first")
+  })
+
+  it("names the available action in each section heading", async () => {
+    // The archive commands are gone, so this list is the only place a user is
+    // told where archiving happens. A heading that said only "Working" left the
+    // reader with no next step.
+    const out = __inventory(await rows())
+    const [unarchived, archived] = out.split("**Archived")
+
+    assert.match(unarchived, /Archive/, "unarchived heading must say Archive is available")
+    assert.match(archived, /Restore/, "archived heading must say Restore is available")
+  })
+
+  it("marks each row with its own state and action", async () => {
+    // The heading carries the state, but a row read on its own — copied out of
+    // a search result, say — should still say what can be done to it.
+    const out = __inventory(await rows())
+    const [working, archived] = out.split("**Archived")
+
+    for (const title of ["Alpha work", "Beta work"]) {
+      const at = working.indexOf(title)
+      assert.ok(at !== -1, `${title} must be in the Unarchived section`)
+      assert.ok(
+        working.slice(at, at + 400).includes("unarchived · Archive"),
+        `${title} must be marked Archive`,
+      )
+    }
+    for (const title of ["Gamma work", "Delta work"]) {
+      const at = archived.indexOf(title)
+      assert.ok(at !== -1, `${title} must be in the Archived section`)
+      assert.ok(
+        archived.slice(at, at + 400).includes("archived · Restore"),
+        `${title} must be marked Restore`,
+      )
+    }
   })
 
   it("shows the full id on its own line so it can be copied", async () => {
@@ -157,14 +210,11 @@ describe("/list inventory", () => {
   })
 
   it("puts each session under the heading for its state", async () => {
-    // Rows no longer repeat "working"/"archived" — a row is only ever in one
-    // section, so repeating it on every line was noise. What matters is that a
-    // session appears under the right heading.
     const out = __inventory(await rows())
-    const [working, archived] = out.split("**Archived**")
+    const [unarchived, archived] = out.split("**Archived")
 
     for (const title of ["Alpha work", "Beta work"]) {
-      assert.ok(working.includes(title), `${title} must be in the Working section`)
+      assert.ok(unarchived.includes(title), `${title} must be in the Unarchived section`)
     }
     for (const title of ["Gamma work", "Delta work"]) {
       assert.ok(archived.includes(title), `${title} must be in the Archived section`)
@@ -173,24 +223,23 @@ describe("/list inventory", () => {
 
   it("counts each section", async () => {
     const out = __inventory(await rows())
-    assert.match(out, /\*\*Working[^\n]*\*\* \(2\)/)
-    assert.match(out, /\*\*Archived\*\* \(2\)/)
+    assert.match(out, /\*\*Unarchived[^\n]*\*\* \(2\)/)
+    assert.match(out, /\*\*Archived[^\n]*\*\* \(2\)/)
   })
 
   it("omits a section that is empty rather than showing an empty heading", async () => {
     const onlyWorking = (await rows()).filter((r) => !r.archived)
     const out = __inventory(onlyWorking)
-    assert.ok(!out.includes("**Archived**"), "no Archived heading when nothing is archived")
+    assert.ok(!out.includes("**Archived"), "no Archived heading when nothing is archived")
   })
 
   it("handles having nothing at all", () => {
     assert.equal(__inventory([]), "No sessions found.")
   })
 
-  it("does not number rows, because the two menus count different subsets", async () => {
-    // /archive numbers working only; /unarchive numbers archived only. A
-    // number shared across the inventory would match neither once either
-    // group changed size.
+  it("does not number rows, because the popup numbers each section separately", async () => {
+    // The popup numbers unarchived 1..N and archived 1..M independently. A
+    // shared numbering here would match neither once either group changed size.
     const out = __inventory(await rows())
     assert.ok(!/^\s*\d+\.\s/m.test(out), "inventory must not imply selectable numbering")
   })
