@@ -259,7 +259,25 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list_sessions` in the palette does nothing at all.** The commands
+**clicking a plugin command in the palette does nothing.**
+
+**It is still VISIBLE there.** This was wrong in an earlier revision of this
+file, which said the command was absent from the palette and sent a reader
+looking for something missing. It is not missing. The client fetches
+`GET /api/command` (`command.list`, *"Retrieve currently registered commands"*)
+and receives a `command.updated` event when the set changes — so every plugin
+command appears, listed and clickable-looking. Only the *execute* path is
+enum-gated. Verified against `app.asar` on this build: the palette fetches the
+list, the union of 18 literals is compiled into the renderer.
+
+That is worse than invisible, and it explains the intermittent case below:
+if the autocomplete dropdown is still open when Enter is pressed, the click path
+runs, `tui.command.execute` is sent with a name the schema rejects, and nothing
+happens — while typing the same name works.
+
+Patching the enum is possible (`app.asar` is a file on disk) but it is
+root-owned, replaced on every OpenCode update, and the receiving handler may
+carry a second gate. Not worth it for one click.
 must be typed. A plugin cannot register into the enum.
 
 This also plausibly explains an intermittent case where `/archive_Put 2` did
