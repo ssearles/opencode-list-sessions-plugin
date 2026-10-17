@@ -1,7 +1,7 @@
 # AGENTS.md — opencode-archive-session
 
 ## Project Overview
-OpenCode plugin to archive, list, read, save and restore sessions — including
+OpenCode plugin to archive, list, read and restore sessions — including
 sessions OpenCode itself can no longer bring back.
 
 Two problems, one plugin:
@@ -11,13 +11,13 @@ Two problems, one plugin:
   SQLite, and is the only way back.
 - **Export is truncated and unreadable.** The TUI `/export` writes only the
   messages currently loaded in the window, and both it and
-  `opencode session export` produce JSON. `/save` reads every message for the
-  session straight out of SQLite and writes Markdown.
+  `opencode session export` produce JSON. The popup window reads every message
+  for a session straight out of SQLite and writes Markdown.
 
 Forked from `opencode-session-transcript`, which had dropped archiving in
 `f5a38ef` when it pivoted to Markdown export. That commit deleted ~714 lines of
-`index.ts` and all four archive test files. They are restored here, and `/save`
-ships alongside them rather than instead of them.
+`index.ts` and all four archive test files. They are restored here, and the
+popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
@@ -47,7 +47,8 @@ npm run typecheck # tsc --noEmit (requires TypeScript installed)
 - Every write takes a consistent snapshot first via `VACUUM INTO` (WAL-safe).
   Backups land in `~/.local/share/opencode/backups/`.
 - Writes are transactional per-session; unknown ids are reported, not thrown.
-- `/save` is **read-only**. It opens the store and renders; it never writes.
+- Transcript writing is **read-only**. It opens the store and renders; it never
+  writes to the database.
 
 ## Critical Behavior: Restoring
 Clearing `time_archived` alone is **not enough**. OpenCode orders sessions by
@@ -58,7 +59,6 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 | Command | Purpose |
 |---------|---------|
 | `/list_sessions` | Opens the session popup window; `--text` prints the list instead |
-| `/save [path.md]` | Write the session to Markdown, default `~/Downloads/<title>.md` |
 
 **`/archive_Put` and `/archive_Pull` were removed.** Archiving, restoring,
 deleting, transcript and JSON export all moved into the popup window
@@ -67,11 +67,27 @@ things worth typing, and because a plugin cannot present a menu the desktop app
 will render — see "Why There Is No Dropdown" below. The `session_archive` tools
 are unchanged: archive and restore are still agent-callable.
 
-`/save` takes an explicit output path when the argument ends in `.md`, so
-`/save ~/Desktop/today.md` works unconfigured. Otherwise the filename is the
-session's own title, slugified — **two sessions sharing a title will overwrite
-each other**, which is why the explicit form exists. Override the default folder
-with `OPENCODE_TRANSCRIPT_DIR`.
+**`/save` was removed too.** It wrote a Markdown transcript to
+`~/Downloads/<title>.md`, which the popup's **Transcript.md** button does — and
+does better, because it also decodes the ~200KB base64 blobs of pasted
+screenshots into real PNGs beside the file, which `toMarkdown` never did. Two
+commands writing the same file, one of them worse, is a trap. `OPENCODE_TRANSCRIPT_DIR`
+went with it.
+
+What is lost: a transcript with no display. `session_archive`'s `read_transcript`
+tool still reads one, and reads archived sessions OpenCode's own UI cannot show.
+`toMarkdown`, `slug` and `messageText` stay in `src/markdown.ts` — the popup
+renders its own Markdown in Python, but these are still exported for tests.
+
+### `/popup` Lives In Another Repository
+
+`/popup` opens the generic info window and knows nothing about sessions, so it
+is **not registered here**. It is `opencode-popup-window`, its own repository,
+loaded separately from `opencode.json`. The two share no code — each has its own
+`windowCommand()`, duplicated rather than imported, because a shared package
+between two private repos costs more than 25 duplicated lines.
+
+`test/naming.test.ts` fails if `/popup` is ever registered here again.
 
 ## The Popup Window
 `popup/session-list-popup` in this repo, installed to
@@ -243,9 +259,8 @@ session.last, prompt.clear, prompt.submit, agent.cycle
 ```
 
 No plugin command appears in that enum and it is compiled into the client, so
-**clicking `/list_sessions`, `/archive_Put`, `/archive_Pull` or `/save` in the
-palette does nothing at all.** The commands must be typed. A plugin cannot
-register into the enum.
+**clicking `/list_sessions` in the palette does nothing at all.** The commands
+must be typed. A plugin cannot register into the enum.
 
 This also plausibly explains an intermittent case where `/archive_Put 2` did
 nothing while `/archive_Put 1` worked: if the autocomplete dropdown is still open
@@ -405,11 +420,11 @@ titled "99 versions of the manual".
    basic auth `opencode:$PW`.
 4. Confirm load: `GET /api/plugin` → `source.type == "local"`.
 5. Confirm commands: `GET /api/command` → expect
-   `list_sessions, archive_Put, archive_Pull, save` alongside `init, review`.
+   `list_sessions, popup` alongside `init, review`.
 6. Confirm no shadowing: prompt a session to use the **core** `read` tool and
    check it still reads a file.
 7. Confirm function: flip `time_archived` in `session_v2` via `/archive_Put`
-   and `/archive_Pull`; write a Markdown file via `/save`.
+   and `/archive_Pull`; write a Markdown file via the popup's Transcript.md.
    `probe.ts` drives all of this headlessly — `node probe.ts <out>` to read,
    `node probe.ts <out> --write` to exercise the archive/restore round trip.
 8. Kill the server and delete every test session — they land in the **real**
@@ -432,8 +447,9 @@ test/sessionlog.test.ts   # The running output log appends and trims
 test/retention.test.ts    # Bounded backups
 popup/session-list-popup  # The GTK window — source of truth, symlinked into ~/.local/bin
 popup/test-popup-gui.py   # Widgets, strips, layout, delete dialog, export
-popup/test-popup-writes.py    # Write path: guards, delete, backups, ordering
+popup/test-popup-writes.py    # Write path: guards, delete, backups, ordering, images
 popup/test-popup-lifecycle.py  # Closing ends the process; no orphans
+popup/test-popup-scroll.py     # Many sessions stay reachable; the scrollbar is real
 probe.ts                  # Headless driver — run commands, capture to a file
 package.json           # main: "./index.ts", exports: ".": "./index.ts"
 tsconfig.json          # noEmit, strict, include: src/** test/**
@@ -445,7 +461,6 @@ Test-only exports from `index.ts`: `__resolve`, `__menu`, `__pickByNumber`,
 ## Environment
 - Default DB: `~/.local/share/opencode/opencode.db` (or `XDG_DATA_HOME/opencode/opencode.db`)
 - Override with `OPENCODE_DB` env var (used by tests)
-- `/save` output dir override: `OPENCODE_TRANSCRIPT_DIR`
 - Requires Node 22+ or Bun
 - The repo is **private while in testing**. It is not published to npm, and
   `~/.config/opencode/opencode.json` loads `opencode-session-transcript` from npm
@@ -470,6 +485,7 @@ curl -su "opencode:$(python3 -c "import json;print(json.load(open('$HOME/.config
   http://127.0.0.1:49374/api/command | python3 -c "import sys,json;print([c['name'] for c in json.load(sys.stdin)['data']])"
 ```
 
-With the npm package loaded, expect exactly `['init', 'review', 'save']`. Any
+With the npm package loaded, expect exactly `['init', 'review', 'list_sessions',
+'popup']`. Any
 `list_sessions`, `archive_Put` or `archive_Pull` in that output means a local
 checkout is live.

@@ -57,7 +57,7 @@ describe("command names in text", () => {
   it("finds the registered commands (guard on the extraction itself)", () => {
     // If this fails, the extraction above is broken and every other assertion
     // in this file would pass vacuously.
-    for (const expected of ["list_sessions", "save"]) {
+    for (const expected of ["list_sessions"]) {
       assert.ok(
         REGISTERED.includes(expected),
         `expected to find the /${expected} command in the source; extraction found ` +
@@ -76,6 +76,34 @@ describe("command names in text", () => {
         `/${gone} is registered as a command again; archiving belongs in the popup`,
       )
     }
+  })
+
+  it("registers no popup command, which is another plugin's job", () => {
+    // `/popup` opens the generic info window and knows nothing about sessions.
+    // It moved to `opencode-popup-window`, its own repository, because the only
+    // thing the two shared was a launcher. Registering it here would put a
+    // second, unrelated plugin's command in this one's palette and keep
+    // re-implementing `windowCommand` in a repo that has no use for it.
+    assert.ok(
+      !REGISTERED.includes("popup"),
+      "/popup is registered here again; it belongs to opencode-popup-window",
+    )
+  })
+
+  it("registers no save command, which the popup window replaced", () => {
+    // `/save` wrote a Markdown transcript to ~/Downloads. The popup's
+    // Transcript.md button does the same thing, and does it better: it also
+    // decodes the ~200KB base64 blobs of pasted screenshots to real PNGs beside
+    // the file, which `toMarkdown` never did. Two commands that both write a
+    // file, one of which does it worse, is a trap rather than a feature.
+    //
+    // What is lost: a transcript with no display. `session_archive`'s
+    // `read_transcript` tool still reads one, and it reads archived sessions
+    // that OpenCode's own UI cannot show.
+    assert.ok(
+      !REGISTERED.includes("save"),
+      "/save is registered as a command again; transcripts belong in the popup",
+    )
   })
 
   it("never references a command that is not registered", () => {

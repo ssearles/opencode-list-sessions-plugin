@@ -16,32 +16,7 @@ import { slug, toMarkdown } from "./src/markdown.ts"
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-
-/**
- * Where `/save` writes by default. Override with OPENCODE_TRANSCRIPT_DIR.
- *
- * ~/Downloads rather than a plugin-owned folder, so the file is recognisable in
- * a file manager without the user having to know where a plugin keeps things --
- * and the same folder the popup window's Transcript.md button writes to, so
- * there is one place transcripts land instead of two depending on which one you
- * used.
- */
-function transcriptDir(): string {
-  const custom = process.env.OPENCODE_TRANSCRIPT_DIR
-  if (custom) return custom
-  return join(homedir(), "Downloads")
-}
-
-/**
- * Human-readable form of the default output directory, for the `/save`
- * description. Uses `~` rather than an expanded home path so the command popup
- * reads the same on every machine rather than naming one user's account.
- */
-function displayDir(): string {
-  const dir = transcriptDir()
-  const home = homedir()
-  return dir === home ? "~" : dir.startsWith(home + "/") ? "~/" + dir.slice(home.length + 1) : dir
-}
+import { fileURLToPath } from "node:url"
 
 /**
  * Minimal structural types for the slice of the plugin context this plugin
@@ -88,26 +63,47 @@ interface PluginContext {
 const store = () => SessionStore.open()
 
 /**
- * Where the popup window lives, and how to launch it.
+ * Where a window script lives, and how to launch it.
  *
- * ~/.local/bin is on PATH on a stock install, so the bare name is tried first
- * and the absolute path is the fallback. Both are checked for existence before
- * anything is spawned, because a spawn that fails asynchronously looks exactly
- * like a window that never opened — and the report then blames the window
- * rather than the missing file.
+ * Three places, in order:
+ *
+ *   1. `~/.local/bin`, by bare name if that directory is on PATH.
+ *   2. The package's own `popup/` directory, resolved from this file.
+ *   3. `~/.local/bin` by absolute path.
+ *
+ * (2) is what makes the window work for someone who installed the package from
+ * npm and never ran the bundle. The script ships in `files`, so it is already
+ * on disk beside this file -- running it from there costs one `existsSync` and
+ * writes nothing into the user's home. The alternative, having the plugin
+ * install itself into `~/.local/bin` on load, was rejected: a plugin silently
+ * writing to a PATH directory is the sort of thing that should be a deliberate
+ * act, not a side effect of the package loading.
+ *
+ * Every candidate is checked before anything is spawned, because a spawn that
+ * fails asynchronously looks exactly like a window that never opened — and the
+ * report then blames the window rather than the missing file.
  */
-function popupCommand(): { bin: string; args: string[] } | { error: string } {
-  const candidates = [join(homedir(), ".local", "bin", "session-list-popup")]
+function windowCommand(name: string, extraArgs: string[] = []): { bin: string; args: string[] } | { error: string } {
+  const localBin = join(homedir(), ".local", "bin")
+  const candidates = [join(localBin, name)]
   const onPath = process.env.PATH ?? ""
-  if (onPath.split(":").includes(join(homedir(), ".local", "bin"))) {
-    candidates.unshift("session-list-popup")
-  }
+  if (onPath.split(":").includes(localBin)) candidates.unshift(name)
+
+  // Resolved from this file's own location, not from process.cwd(): a plugin is
+  // loaded from wherever it was installed, and the cwd is the user's project.
+  const packaged = join(dirname(fileURLToPath(import.meta.url)), "popup", name)
+  candidates.push(packaged)
 
   for (const bin of candidates) {
-    const absolute = bin.includes("/") ? bin : join(homedir(), ".local", "bin", bin)
-    if (existsSync(absolute)) return { bin, args: [] }
+    const absolute = bin.includes("/") ? bin : join(localBin, bin)
+    if (existsSync(absolute)) return { bin, args: extraArgs }
   }
-  return { error: `session-list-popup not found (looked in ~/.local/bin)` }
+  return { error: `${name} not found (looked in ~/.local/bin and the package)` }
+}
+
+/** The session window, with no arguments. */
+function popupCommand(): { bin: string; args: string[] } | { error: string } {
+  return windowCommand("session-list-popup")
 }
 
 /**
@@ -118,7 +114,19 @@ function popupCommand(): { bin: string; args: string[] } | { error: string } {
  * with it. `setsid` is belt-and-braces for the same reason.
  */
 function openPopup(): { ok: true } | { ok: false; reason: string } {
-  const found = popupCommand()
+  return launch(popupCommand())
+}
+
+/**
+ * Spawn a window script, detached.
+ *
+ * `detached: true` plus `unref()` matters: without it the window is a child of
+ * the OpenCode server, and closing the app that ran the command takes the window
+ * with it. `setsid` is belt-and-braces for the same reason.
+ */
+function launch(
+  found: { bin: string; args: string[] } | { error: string },
+): { ok: true } | { ok: false; reason: string } {
   if ("error" in found) return { ok: false, reason: found.error }
 
   try {
@@ -652,85 +660,14 @@ export default {
                     "",
                     "Printing the list as text instead. Archive, restore, delete and " +
                       "export are in the popup window when it is available; " +
-                      "`/save` and the `session_archive` tools still work " +
-                      "without it.",
+                      "the `session_archive` tools still work without it, " +
+                      "and so does a transcript of any session.",
                     "",
                     inventory(await (await store()).list()),
                   ].join("\n"),
             )
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        },
-      })
-    })
-
-    // /archive_Put and /archive_Pull were removed as commands.
-    //
-    // Archiving and restoring moved to `session-list-popup`, a standalone GTK
-    // window that archives on right-click. The numbered text menus existed only
-    // because OpenCode exposes no picker to a plugin — the TUI bus carries just
-    // command.execute, prompt.append, session.select and toast.show, and a
-    // plugin context has event.subscribe with no publish. A real window removes
-    // that constraint entirely, and with it the off-by-one risk that typing a
-    // stale number into a menu caused.
-    //
-    // `SessionStore.archive` / `.unarchive` are untouched and still back the
-    // `session_archive` tools below, so the agent can still archive on request.
-
-    /**
-     * `/save` — write the session out as readable Markdown.
-     *
-     * Added when this plugin was forked from `opencode-session-transcript`,
-     * where it is the only command. It is read-only: it opens the store and
-     * renders, and never writes to the database.
-     *
-     * Unlike `/export` and `opencode session export`, which both emit JSON,
-     * and unlike the TUI `/export`, which only sees the messages currently
-     * loaded in the window, this reads every message for the session straight
-     * out of SQLite — so the transcript is complete however long the thread is
-     * and however little of it has been scrolled.
-     */
-    await ctx.command.transform((editor) => {
-      editor.add({
-        name: "save",
-        description:
-          "Export the whole session to " + displayDir() + "/<title>.md — " +
-          "like /export, but flushes all messages",
-        execute: async ({ sessionID, prompt }: { sessionID: string; prompt?: { text?: string } }) => {
-          try {
-            const s = await SessionStore.open()
-            const meta = await s.get(sessionID)
-            const markdown = await toMarkdown(s, sessionID)
-
-            // An argument ending in .md is taken as an explicit output path, so
-            // `/save ~/Desktop/today.md` works without any configuration.
-            const asked = (prompt?.text ?? "")
-              .trim()
-              .split(/\s+/)
-              .filter((t) => t && !t.startsWith("/"))
-            const explicit = asked.find((a) => a.endsWith(".md"))
-
-            const target = explicit
-              ? explicit.replace(/^~(?=\/)/, homedir())
-              : join(transcriptDir(), (slug(meta?.title ?? "session")) + ".md")
-
-            mkdirSync(dirname(target), { recursive: true })
-            writeFileSync(target, markdown, "utf8")
-
-            const headings = markdown.split("\n").filter((l) => l.startsWith("### "))
-            await ctx.session.synthetic({
-              sessionID,
-              text:
-                "`" + target + "`\n\n" +
-                headings.length + " messages · " +
-                Math.round(markdown.length / 1024) + " KB",
-            })
-          } catch (err) {
-            await ctx.session.synthetic({
-              sessionID,
-              text: "Error: " + (err instanceof Error ? err.message : String(err)),
-            })
           }
         },
       })

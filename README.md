@@ -1,12 +1,12 @@
 # opencode-archive-session
 
-Archive, list, read, save and restore OpenCode sessions — including sessions
+Archive, list, read and restore OpenCode sessions — including sessions
 OpenCode itself can no longer bring back.
 
 Forked from
 [`opencode-session-transcript`](https://github.com/ssearles/opencode-session-transcript),
 which had dropped archiving when it pivoted to Markdown export. That work is
-restored here, and `/save` ships alongside it rather than instead of it.
+restored here, and a session window ships alongside it rather than instead of it.
 
 ## Why this exists
 
@@ -18,12 +18,14 @@ SQLite, and is the only way back.
 in the window
 ([#50732](https://github.com/anomalyco/opencode/issues/50732),
 [#50014](https://github.com/anomalyco/opencode/issues/50014)) — nothing warns you,
-so the file looks complete. `/save` reads every message for the session straight
-out of SQLite.
+so the file looks complete. The window's **Transcript.md** button reads every
+message for the session straight out of SQLite, and also writes out any
+screenshots pasted into the conversation.
 
 > **Not a backup.** `/export` writes JSON, which `opencode import` can read back.
-> `/save` writes Markdown, which cannot be re-imported, and it drops assistant
-> reasoning to do it. If you want a restorable archive, keep using `/export`.
+> Markdown cannot be re-imported, and it drops assistant reasoning to do it. If
+> you want a restorable archive, keep using `/export`, or the window's
+> **Export .json** button, which produces the same importable format.
 
 ## Install
 
