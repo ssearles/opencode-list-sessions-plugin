@@ -520,8 +520,7 @@ const totals = storeTotals(all)
  * line exists for — is last but close enough to survive.
  */
 const LIST_SESSIONS_DESCRIPTION =
-  "Stats, Archive, Restore, Transcript.md, Export.json, Delete — right-click a " +
-  "row, nothing to type"
+  "Stats, Archive, Restore, Transcript.md, Export.json, Delete — right click row -> action buttons"
 
 /**
  * Frame a report as a status note rather than a request.

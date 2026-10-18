@@ -216,10 +216,19 @@ describe("the /list_sessions palette line", () => {
     assert.match(__popupOpenedNote(), /Database/, "the opened note must name the footer report")
   })
 
-  it("says the actions are clicked rather than typed", () => {
+  it("says the actions are buttons you click rather than things to type", () => {
     // The point of the line. Without it, "Archive, Restore, …" reads as a list
     // of things this command does, which is what it used to mean.
-    assert.match(__listSessionsDescription, /nothing to type/i)
+    //
+    // Asserted on the meaning, not on the exact old wording: this line has
+    // said "right-click a row, nothing to type" and now says "right click row
+    // -> action buttons", and both answer the same question. Pinning the old
+    // sentence would have made a copy edit a test failure.
+    assert.match(
+      __listSessionsDescription,
+      /\b(button|click|nothing to type)/i,
+      "the palette line must say these are clicked, not typed",
+    )
   })
 
   it("stays short enough for a palette entry", () => {

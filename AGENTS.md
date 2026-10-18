@@ -424,7 +424,7 @@ person who used to type it where its job went** — so the one line they still s
 for `/list_sessions` has to carry it:
 
 ```
-Archive, Restore, Transcript.md, Export.json, Delete — right-click a row, nothing to type
+Stats, Archive, Restore, Transcript.md, Export.json, Delete — right click row -> action buttons
 ```
 
 It was 161 chars of layout ("Open the session popup window — unarchived first,
@@ -432,9 +432,15 @@ then archived, with … on each row"), which is what the window's own banner is
 for, and which described a window instead of advertising what can be done in it.
 
 Two constraints, because the palette truncates and the **front** is what
-survives: the actions come first, and the line is ≤110 chars.
-`test/status.test.ts` asserts both, plus that every action is named, that
-"nothing to type" is present, and that no layout phrase crept back in.
+survives: the actions come first, and the line is ≤110 chars (now 95).
+`test/status.test.ts` asserts both, plus that every action is named, that no
+layout phrase crept back in, and that the line says these are **clicked**.
+
+That last one is asserted on the **meaning**, not the wording. The tail has been
+"right-click a row, nothing to type" and is now "right click row -> action
+buttons", and both answer the same question — these are buttons, not
+subcommands. Pinning the old sentence would have turned a copy edit into a test
+failure, which is the failure mode the rest of this file is about.
 
 `LIST_SESSIONS_DESCRIPTION` is a module constant rather than an inline literal so
 `status.test.ts` can assert on it — the same reasoning as the report builders.
