@@ -111,14 +111,21 @@ def main():
         check("no action strip visible at start",
               all(not r.actions.get_visible() for r in rows))
 
-        print("\nright-click reveals the strip for that row only")
+        print("\na left click reveals the strip -- that is the documented action")
         target = rows[0]
         check("no strip visible before the click",
               all(not r.actions.get_visible() for r in rows))
-        click(target, button=3)
+        click(target, button=1)
         check("clicked row's strip is visible", target.actions.get_visible())
         check("other rows' strips stay hidden",
               all(not r.actions.get_visible() for r in rows[1:]))
+
+        print("\nright click also opens it, and re-selects the row")
+        target2 = rows[2]
+        click(target2, button=3)
+        check("right-click opens that row's strip", target2.actions.get_visible())
+        check("and only that row's", all(not r.actions.get_visible() for r in rows
+                                         if r is not target2))
 
         print("\nleft-click on another row moves the strip")
         other = rows[1]
@@ -1261,6 +1268,53 @@ def main():
                 _prefs.unlink(missing_ok=True)
             else:
                 _prefs.write_text(_saved_pref)
+
+        print("\nrows announce that they can be clicked")
+        # The CSS must PARSE, not merely contain a rule. GTK3 rejects `:has()`
+        # with an exception rather than ignoring it, so an earlier attempt to
+        # exclude section rows from the hover silently took the whole stylesheet
+        # down with it -- and nothing in this suite would have said so.
+        _parsed = True
+        _err = ""
+        try:
+            _p = Gtk.CssProvider()
+            _p.load_from_data(pop.scaled_css(pop.CSS, pop.FONT_DEFAULT))
+        except Exception as _e:  # noqa: BLE001 -- any failure is a broken CSS
+            _parsed, _err = False, str(_e)[:120]
+        check("the shipped stylesheet parses", _parsed, _err)
+        _css = pop.scaled_css(pop.CSS, pop.FONT_DEFAULT).decode()
+        check("rows have a hover style, so a clickable row looks clickable",
+              re.search(r"row:hover\s*\{[^}]*background-color", _css) is not None,
+              "no row:hover background rule")
+        check("the hover is lighter than the selected row, so it cannot be "
+              "mistaken for a selection",
+              _css.count("#f2f6f9") == 1 and "row.selected { background-color: #d6e8f5" in _css)
+        check("no selector GTK3 cannot parse",
+              ":has(" not in _css and ":is(" not in _css and ":where(" not in _css)
+        # Section rows are set_selectable(False), so GTK never hovers them --
+        # checked here because it is the reason no exclusion rule is needed.
+        _section_rows = [r for r in win.listbox.get_children()
+                         if getattr(r, "is_section", False)]
+        check("section rows are not selectable, so they never hover",
+              _section_rows and all(not r.get_selectable() for r in _section_rows),
+              f"{len(_section_rows)} section rows")
+
+        print("\nscript paths in the report are whole")
+        _store = pop.Store(db)
+        _env = dict(pop.database_sections(pop.database_stats(_store), _store))
+        _lines = _env["ENVIRONMENT"].splitlines()
+        _paths = [l.strip() for l in _lines if "popup/" in l]
+        check("the resolved script paths are in the report", len(_paths) >= 2,
+              str(_paths))
+        # Truncated from the left, these read "…ct/opencode-session-transcript"
+        # -- which names the repo but not where it is, so it cannot answer the
+        # one question the line exists for: is this the copy in ~/.local/bin
+        # or the one in the checkout?
+        check("and none of them are elided",
+              all("…" not in p for p in _paths), str(_paths))
+        check("each path is absolute, so it says where it lives",
+              all(p.split(None, 1)[1].startswith("/") for p in _paths if " " in p),
+              str(_paths))
 
         print("\nthe real database was not modified by this run")
         # Compare against the state captured at the start, not against "no

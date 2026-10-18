@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenCode session inventory in a GTK window, with archiving on right-click.
+OpenCode session inventory in a GTK window, with archiving on click.
 
 The desktop app's own archive button is compiled out of the renderer
 (`d8=!1` in app.asar gates it), and the plugin's slash commands only render
@@ -824,8 +824,8 @@ def plain_text(store: Store) -> str:
             lines.append(f"     {d['id']}  ·  " + "  ·  ".join(bits))
         return lines
 
-    out = block("Unarchived — right-click one to Archive", working)
-    out += [""] + block("Archived — right-click one to Restore", archived)
+    out = block("Unarchived — click one to Archive", working)
+    out += [""] + block("Archived — click one to Restore", archived)
     out += ["", "Run this without --copy for the window with Archive/Restore buttons."]
     return "\n".join(out).strip()
 
@@ -924,7 +924,22 @@ window { background-color: #ffffff; color: #000000; }
 row.selected { background-color: #d6e8f5; }
 row.selected .title { color: #000000; }
 
-/* The action strip under a right-clicked row. */
+/* Hover says "this is a thing you can click".
+
+   Both mouse buttons open the strip, but a LEFT click is the one a person
+   reaches for, and nothing on screen said so until the click landed. Every
+   piece of copy in this project said "right-click", which described the less
+   discoverable of the two and made the obvious one look broken.
+
+   `:hover` does this with no motion handler and no state flag - GTK applies
+   it when the pointer is over the row, so there is nothing to keep in sync
+   and nothing to leave stale when rows are rebuilt.
+
+   Lighter than `row.selected` on purpose. A hover is a hint and must not look
+   like a selection, or it lies about which row the buttons will hit. */
+row:hover { background-color: #f2f6f9; }
+
+/* The action strip under the clicked row. */
 .actions {
   background-color: #eef4f8;
   border: 1px solid #a8c4d8;
@@ -1928,7 +1943,15 @@ def _environment_lines(env: dict) -> list[str]:
             f" of {env['disk_total_gb']:,.0f} GB")
     lines += ["", "  scripts the plugins will run:"]
     for name, path in env["scripts"].items():
-        lines.append(f"    {name:<20} {_short(path, 56)}")
+        # In full, not `_short`. The whole point of this line is to answer "is
+        # the binary I'm running the one in this repo, or a stale copy in
+        # ~/.local/bin" -- and `_short` keeps the tail, so it ate
+        # `/home/steven/Documents/` and left `…ct/opencode-session-transcript`,
+        # which names the repo but not where it is and not which install won.
+        # The same truncation was already removed from FILES TOUCHED for the
+        # same reason: a truncated path that cannot be told from another
+        # truncated path is worse than a long one.
+        lines.append(f"    {name:<20} {path}")
 
     # USB, because slow I/O looks exactly like a hung agent. A drive on a 480
     # Mbps port is a dozen times slower than the same drive on a 5Gbps port,
@@ -2120,11 +2143,12 @@ class Window(Gtk.Window):
         t.get_style_context().add_class("banner-title")
         t.set_xalign(0)
         h = Gtk.Label(
-            label="Right-click a session for its buttons: Stats, Archive or "
+            label="Click a session for its buttons: Stats, Archive or "
             "Restore, Transcript.md, Export.json, Delete, Close.\n\n"
             "Stats is read-only and reports one session. Database, in the "
             "footer, reports the whole store and this machine.\n\n"
-            "The three buttons pick the order; the box filters as you type.\n\n"
+            "Rows light up under the mouse. The three buttons pick the order;\n"
+            "the box filters as you type.\n\n"
             "OpenCode's own session menu caches its list, so restart it after "
             "archiving, restoring or deleting here."
         )
@@ -2388,13 +2412,13 @@ class Window(Gtk.Window):
 
         if working:
             self.listbox.add(
-                self._section("UNARCHIVED — right-click one to Archive it")
+                self._section("UNARCHIVED — click one to Archive it")
             )
             for d in working:
                 self.listbox.add(self._row(d, archived=False))
         if archived:
             self.listbox.add(
-                self._section("ARCHIVED — right-click one to Restore it")
+                self._section("ARCHIVED — click one to Restore it")
             )
             for d in archived:
                 self.listbox.add(self._row(d, archived=True))
@@ -2405,7 +2429,7 @@ class Window(Gtk.Window):
             parts.insert(0, f"{len(shown)} of {len(data)} shown")
             parts.append(f"filter: “{self.query.strip()}”")
         parts.append(order[3])
-        parts.append("right-click a row for its buttons, Close to back out")
+        parts.append("click a row for its buttons, Close to back out")
         hint = "  ·  ".join(parts)
         if live:
             hint += "  ·  the THIS SESSION row cannot be archived or deleted"

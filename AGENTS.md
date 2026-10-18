@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (157) + the five popup suites (416 checks)
+npm test          # node --test test/ (158) + the five popup suites (426 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -299,7 +299,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 183 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
+| `popup/test-popup-gui.py` | 193 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 7 | Many sessions stay reachable; the scrollbar is real |
@@ -555,6 +555,44 @@ version assertion passes forever on a box where all three installs agree — whi
 is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
+
+### A Left Click Is The Action, And Copy That Said "Right-Click" Hid It
+`_on_press` has always handled both buttons: **button 1 toggles** the strip,
+**button 3 selects and opens** it. But every piece of user-facing copy said
+"right-click" — the banner, the two section headings, the strip label, the
+palette line and `popupOpenedNote()`. That described the *less discoverable* of
+the two and made the obvious one look broken.
+
+So the copy says **click**, and rows carry `row:hover`, which is the affordance
+the copy cannot provide: you can see a row is clickable before clicking it.
+
+Deliberately **lighter than `row.selected`**. A hover is a hint; if it looked
+like a selection it would lie about which row the buttons will hit. No motion
+handler and no state flag — `:hover` is GTK's own, so there is nothing to keep
+in sync and nothing to leave stale when rows are rebuilt.
+
+Section rows need no exclusion rule: `_section()` calls `set_selectable(False)`,
+so GTK never hovers them. Asserted, because "GTK probably does the right thing
+here" is not a thing to rely on.
+
+**`test-popup-gui.py` asserts the stylesheet PARSES**, not merely that it
+contains a rule. GTK3 raises on an unsupported selector rather than ignoring
+it, so `row:has(> box > label.is_section):hover` took the whole stylesheet down
+with it — and nothing in the suite would have said so. The window still opened;
+it just had no CSS at all. `:has(`, `:is(` and `:where(` are now checked for by
+name too.
+
+### Paths In The Report Are Shown Whole
+The ENVIRONMENT section ran its script paths through `_short(path, 56)`, which
+truncates **from the left**, so it printed
+`…ct/opencode-session-transcript/popup/session-list-popup`. That names the repo
+but not where it is, so it cannot answer the only question the line exists for:
+*is this the copy in `~/.local/bin` or the one in the checkout?*
+
+This is the same truncation that was already removed from FILES TOUCHED, and for
+the same recorded reason — **a truncated path that cannot be told apart from
+another truncated path is worse than a long one** — so it is worth checking any
+new `_short()` caller. Two of them now exist and both are asserted unelided.
 
 ### Text Size: A-, A+ And Reset, And The Width It Broke Twice
 Mirrors `opencode-popup-window`'s info-window — same names, same bounds

@@ -495,7 +495,7 @@ const totals = storeTotals(all)
     ...sections,
     ...hidden,
     "",
-    "Archive and restore from the `session-list-popup` window: right-click a session " +
+    "Archive and restore from the `session-list-popup` window: click a session " +
       "there for an Archive or Restore button on it.",
     ...(totals ? ["", totals] : []),
   ].join("\n\n")
@@ -520,7 +520,7 @@ const totals = storeTotals(all)
  * line exists for — is last but close enough to survive.
  */
 const LIST_SESSIONS_DESCRIPTION =
-  "Stats, Archive, Restore, Transcript.md, Export.json, Delete — right click row -> action buttons"
+  "Stats, Archive, Restore, Transcript.md, Export.json, Delete — click row -> action buttons"
 
 /**
  * Frame a report as a status note rather than a request.
@@ -570,7 +570,7 @@ function popupOpenedNote(): string {
       "",
       "It lists every session — unarchived first, then archived, each section " +
         "most recently modified first, with Name and Start date one click away. " +
-        "The user drives it with the mouse: right-click a row " +
+        "The user drives it with the mouse: click a row " +
         "for that session's buttons, Stats, Archive or Restore, Transcript.md, " +
         "Export.json, Delete, and Close to back out without writing anything.",
       "",

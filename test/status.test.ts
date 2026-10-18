@@ -73,7 +73,7 @@ describe("/list_sessions reports are status, not instructions", () => {
   }
 
   it("does not instruct the reader to interact with the window", () => {
-    // The sentence that started the loop. It is still true that right-clicking
+    // The sentence that started the loop. It is still true that clicking
     // a row is how you reach a session's buttons — but as a description of what
     // the window is for, with the mouse, attributed to the user.
     const opened = __popupOpenedNote()
@@ -82,6 +82,23 @@ describe("/list_sessions reports are status, not instructions", () => {
       "the imperative 'right-click a session there' is back; it reads as a task",
     )
     assert.match(opened, /the user drives it with the mouse/i)
+  })
+
+  it("describes the click the window actually responds to", () => {
+    // Both buttons open the strip, but a LEFT click is the one a person
+    // reaches for, and every piece of copy said "right-click" — describing the
+    // less discoverable of the two and making the obvious one look broken.
+    // Rows now carry a hover style, so the affordance is on screen too.
+    for (const [name, text] of [
+      ["the palette line", __listSessionsDescription],
+      ["the opened note", __popupOpenedNote()],
+    ] as const) {
+      assert.ok(
+        !/right[- ]click/i.test(text),
+        `${name} still says right-click; the window answers a left click too`,
+      )
+    }
+    assert.match(__listSessionsDescription, /click row/i)
   })
 
   it("does not offer the agent a way to finish the job", () => {

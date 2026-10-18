@@ -70,6 +70,12 @@ Sections are foldable and folded by default when long, so a report is not a
 scrollbar of file paths. **Copy** puts the whole report — folded sections
 included — on the clipboard.
 
+### Getting to a session's buttons
+
+**Click a row.** Rows light up under the mouse so it is clear they are
+clickable; the right mouse button works too, but a left click is the one that
+opens and closes the strip.
+
 ### Text size
 
 **A-**, **A+** and **Reset size** in the footer, also `Ctrl+minus`,
