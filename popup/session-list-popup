@@ -24,7 +24,6 @@ The buttons on every row, archived or not:
   Archive / Restore  the primary action, and the one the section heading
                      promises. Disabled on the live session, and refused by
                      the write path too.
-  Copy id            the session id, for handing to the CLI.
   Transcript.md      the whole conversation as Markdown, to
                      ~/Downloads/<title>.md. For reading.
   Export.json       OpenCode's own export format, to ~/Downloads/<title>.json,
@@ -2641,10 +2640,6 @@ class Window(Gtk.Window):
         stats_btn.connect("clicked", lambda *_: self._show_stats(d))
         buttons.insert(stats_btn, -1)
 
-        copy_btn = Gtk.Button(label="Copy id")
-        copy_btn.connect("clicked", lambda *_: self._copy_id(d["id"]))
-        buttons.insert(copy_btn, -1)
-
         read_btn = Gtk.Button(label="Transcript.md")
         read_btn.set_tooltip_text(
             "Write the whole transcript as Markdown to "
@@ -2872,6 +2867,16 @@ class Window(Gtk.Window):
         dlg.show_all()
 
     def _copy_id(self, session_id: str) -> None:
+        """
+        Put a session id on the clipboard.
+
+        No button calls this any more. It was there from the popup's first
+        commit, back when the numbered menus printed ids for you to copy, and
+        nothing had replaced it — but the id is already on screen under every
+        title, and this was the weakest of seven buttons. Kept because it is
+        five lines and is the only clipboard route to an id if one is ever
+        wanted again; deleting it would also mean deleting the decision.
+        """
         clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clip.set_text(session_id, -1)
         clip.store()

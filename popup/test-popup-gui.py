@@ -616,7 +616,7 @@ def main():
             Gtk.main_iteration_do(None)
 
         btns = _find_buttons(row.actions)
-        expected = ("Archive", "Copy id", "Transcript.md", "Export.json",
+        expected = ("Archive", "Stats", "Transcript.md", "Export.json",
                     "Delete", "Close")
         check("every button exists on an unarchived row",
               all(k in btns for k in expected),
@@ -692,7 +692,7 @@ def main():
               str(list(strip_btns)))
         check("the rest stay available on the live row",
               all(strip_btns[k].get_sensitive()
-                  for k in ("Copy id", "Transcript.md", "Export.json", "Close")
+                  for k in ("Stats", "Transcript.md", "Export.json", "Close")
                   if k in strip_btns))
         check("the strip says archiving is not allowed",
               "not allowed" in _strip_label(live_row.actions))
@@ -1268,6 +1268,17 @@ def main():
                 _prefs.unlink(missing_ok=True)
             else:
                 _prefs.write_text(_saved_pref)
+
+        print("\nno button nobody asked for")
+        # Copy id was in the popup's first commit, back when the numbered menus
+        # printed ids to copy. The id is on screen under every title, and it
+        # was the weakest of seven buttons. A test so it does not return as
+        # "while we're here".
+        _labels = {b.get_label() for b in _buttons(win)}
+        check("Copy id is gone", "Copy id" not in _labels, str(sorted(_labels)))
+        _src = Path(pop.__file__).read_text()
+        check("and nothing wires it to a button",
+              'Gtk.Button(label="Copy id")' not in _src)
 
         print("\nrows announce that they can be clicked")
         # The CSS must PARSE, not merely contain a rule. GTK3 rejects `:has()`

@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (158) + the five popup suites (426 checks)
+npm test          # node --test test/ (158) + the five popup suites (428 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -105,7 +105,6 @@ answer to. Right-click a row to open its strip:
 | Button | Does |
 |--------|------|
 | Archive / Restore | The primary action; refused on the session you are working in |
-| Copy id | The session id, for handing to the CLI |
 | Transcript.md | Full transcript to `~/Downloads/<title>.md` |
 | Export.json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
 | Delete | Removes the session, after a dialog defaulting to Cancel |
@@ -299,7 +298,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 193 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
+| `popup/test-popup-gui.py` | 195 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 7 | Many sessions stay reachable; the scrollbar is real |
@@ -555,6 +554,52 @@ version assertion passes forever on a box where all three installs agree — whi
 is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
+
+### Fork Was Asked For, Written, And Then Dropped
+Asked for as a row button. Written — then removed, because the investigation
+underneath it was damning and the user agreed when told.
+
+**OpenCode can fork, and a plugin cannot reach it.** `command.session.fork` is
+in the desktop bundle with localised descriptions ("Create session from
+message"), and the app calls `session.fork({params:{sessionID}, payload:{before}})`
+— it forks *from a message*. But it is absent from `/api/command`, from
+`opencode session` (only `list`/`delete`/`export`/`import`), and from the
+`tui.command.execute` enum the palette dispatches through.
+
+So a window button has to write SQL: a session row, plus every message.
+
+Three things that made writing it worse than not writing it:
+
+- **`message` is EMPTY and `session_message` holds 4,502 rows.** This database
+  has *both* tables. Forking the one named `message` copies nothing and reports
+  success. The code that discovers the table tries `session_message` first —
+  worth remembering before touching anything that assumes `message` exists.
+- **The `data` blob holds no ids** — not the message id, not the session id.
+  The whole plan rested on that, and it is a fact about today's schema, not a
+  guarantee. A future schema putting ids in the blob would produce forks that
+  silently share state with the original.
+- **`fork_boundary` would have been a guess.** OpenCode forks from a message;
+  a row button has no message picker. Null or last-message-id, and no way to
+  check which the app expects.
+
+And the argument that settles it: **the app already ships fork.** A second,
+worse implementation of a feature the user can already reach is not an
+improvement, and this one would be the first time the file writes conversation
+content — the rule it states everywhere else is *only `time_archived` and
+`time_updated` are ever written, never messages.*
+
+**Do not re-add a Fork button without a new way to reach OpenCode's own.**
+If that changes, the change is in `/api/command`, the CLI, or the enum.
+
+### Copy Id Was Nobody's Idea
+In the popup's first commit (`2e68e85`), from when the numbered menus printed
+ids to copy. The id is on screen under every title, so the button was the only
+clipboard route to something already visible — and the weakest of seven.
+
+Removed, with the check still present and now asserting its absence, because
+"it was always there" is exactly how a button nobody asked for survives
+forever. `_copy_id()` itself is kept, unreachable, with a docstring saying why
+— deleting it would delete the decision along with the code.
 
 ### A Left Click Is The Action, And Copy That Said "Right-Click" Hid It
 `_on_press` has always handled both buttons: **button 1 toggles** the strip,
