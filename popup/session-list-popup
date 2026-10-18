@@ -259,7 +259,14 @@ class Store:
         self.path = path
         # The session this window was opened from, when the plugin told us.
         # Authoritative; see resolve_live() for what happens without it.
-        self.current = current
+        #
+        # Normalised with `or None` because two methods read this and they
+        # disagreed about an empty string: list() asks `if not live_id` and
+        # _is_live() asks `is not None`. An empty `--current` therefore marked a
+        # row in the UI while the write path refused nothing -- the window said
+        # "cannot be archived" about a row it would happily archive. Collapsing
+        # it here means both readers see the same thing for every input.
+        self.current = current or None
         if not path.exists():
             raise SystemExit(f"No database at {path}")
         self._connect().close()  # fail fast and clearly

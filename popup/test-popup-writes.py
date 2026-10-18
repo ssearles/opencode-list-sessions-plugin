@@ -242,6 +242,36 @@ def main() -> int:
         finally:
             db_chk.close()
 
+        print("\nan empty --current behaves exactly like no --current")
+        # list() tested `if not live_id` while _is_live() tested
+        # `is not None`. An empty string satisfied one and not the other: the
+        # window marked a row THIS SESSION while the write path refused
+        # nothing, so the button said "cannot be archived" about a row it
+        # would have archived. Normalised in Store.__init__.
+        #
+        # Asserted against a bare Store rather than against a fixed
+        # expectation: the block above deliberately stamps `other_id`, so
+        # falling back to that heuristic is correct, and the invariant is the
+        # two agreeing, not either one marking nothing.
+        empty = pop.Store(db, current="")
+        bare = pop.Store(db)
+        check("an empty --current is stored as absent",
+              empty.current is None, repr(empty.current))
+        rows_empty = empty.list()
+        check("it marks the same row a bare Store marks",
+              [d["id"] for d in rows_empty if d.get("is_live")]
+              == [d["id"] for d in bare.list() if d.get("is_live")])
+        db_empty = sqlite3.connect(db)
+        try:
+            # The failure was the refusal answering False where the bare Store
+            # answers True, so compare both ways across every row rather than
+            # only the marked one.
+            check("the write path agrees with a bare Store on every row",
+                  all(empty._is_live(db_empty, d["id"]) == bare._is_live(db_empty, d["id"])
+                      for d in rows_empty))
+        finally:
+            db_empty.close()
+
         print("\nthe live session cannot be archived")
         # Give one session the marker the desktop app sets for the session you
         # are working in, then prove the write path refuses it. A bare Store,

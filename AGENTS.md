@@ -198,6 +198,19 @@ The refusal checks `--current` **before** asking whether the schema has
 `time_suspended`, so a database without that column still refuses to archive the
 session it was opened from.
 
+`Store.current` is normalised with `or None` in `__init__`. It has two readers
+and they disagreed about an empty string: `list()` asked `if not live_id`,
+`_is_live()` asked `is not None`. An empty `--current` satisfied one and not the
+other, so the window marked a row `THIS SESSION` while the write path refused
+nothing — the button claimed a row could not be archived that it would have
+archived. Collapsing it at the boundary means every input has one meaning for
+both readers.
+
+The test asserts an empty `--current` behaves **identically to no `--current`**,
+comparing it against a bare `Store` rather than a fixed expectation. The block
+above it deliberately stamps a `time_suspended`, so falling back to that
+heuristic is correct and "marks nothing" would be the wrong assertion.
+
 `test-popup-writes.py` asserts this by pointing `time_suspended` at the *wrong*
 session and requiring `--current` to win — both in `list()` and in `_is_live()`.
 Reverting either branch fails 6 checks, so the test is not vacuous.
@@ -287,7 +300,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 | `popup/test-popup-gui.py` | 134 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
-| `popup/test-popup-writes.py` | 57 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
+| `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
