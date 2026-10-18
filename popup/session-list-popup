@@ -494,7 +494,15 @@ class Store:
         """True when this session is the one currently open in OpenCode.
 
         Read inside the write transaction so the check cannot race with the
-        update. See list() for why `time_suspended` is the signal.
+        update.
+
+        Two sources, in the same order and for the same reasons as list(): the
+        `--current` id the plugin passes, which is a fact, then OpenCode's
+        `time_suspended` timestamp, which is a guess and is only consulted when
+        the window was launched bare. See list() for why the timestamp cannot be
+        trusted on its own -- it decides a safety rule here, and all three of
+        its users derived from one guess, so a wrong guess disabled Archive on
+        the wrong session and enabled it on the live one.
         """
         # `--current` wins over the timestamp for the same reason list() does: it is
         # the session this window was actually opened from. Checked before the
