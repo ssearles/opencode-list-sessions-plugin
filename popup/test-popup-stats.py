@@ -19,6 +19,7 @@ suites, and never touches the original.
 
 import importlib.machinery
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
@@ -69,6 +70,13 @@ finally:
 store = pop.Store(db)
 rows = store.list()
 sample = rows[0]["id"]
+
+
+def _write(directory, name, text):
+    """A fixture file, so a reader can be pointed somewhere known."""
+    path = directory / name
+    path.write_text(text)
+    return str(path)
 
 print("\nthe stats functions read the real database")
 s = pop.session_stats(store, sample)
@@ -149,26 +157,68 @@ check("both reports survive an empty report",
       pop.format_session_report({}) == "No such session."
       and pop.format_database_report({}) == "No sessions found.")
 
-print("\npaths in the report keep their filenames")
+print("\nfiles are grouped by directory, in full")
 if d["files"]:
+    groups = pop.group_by_directory(d["files"])
+    placed = sum(len(rows) for _label, rows in groups)
+    check("every file lands in a group", placed == len(d["files"]),
+          f"{placed} vs {len(d['files'])}")
+    check("no file is dropped as 'and N more'",
+          not any("more" in r for _l, rows in groups for r in rows))
+    check("directory paths are not truncated away",
+          all(not label.startswith("…") for label, _r in groups),
+          "a directory heading was clipped")
+    # The heading must be the WHOLE directory. Comparing against the real set
+    # catches any truncation at all, including a plain slice that adds no
+    # ellipsis -- which a `startswith("…")` check waves straight through.
+    real_dirs = {str(p).rpartition("/")[0] for p in d["files"]}
+    shown_dirs = {label.rstrip().rsplit("  —", 1)[0].rstrip("/")
+                  for label, _r in groups}
+    check("every directory appears in full",
+          shown_dirs == real_dirs,
+          f"{len(shown_dirs)} headings vs {len(real_dirs)} real directories")
+    check("filenames are indented under their directory",
+          all(r.startswith("  ") for _l, rows in groups for r in rows),
+          "a filename row is not indented")
+    # The complaint that drove the grouping: two rows both opening with the same
+    # leading ellipsis could not be told apart, because the ellipsis had eaten
+    # the part naming the project.
+    projects = {label.split("/")[3] for label, _r in groups
+                if label.count("/") > 3}
+    check("different projects are told apart", len(projects) > 1,
+          str(sorted(projects)))
+
+    # And the SECTION must hold the grouped form. Calling group_by_directory()
+    # directly and liking the answer proves nothing about what the window is
+    # actually handed -- which is exactly what survived a mutation that put the
+    # flat truncated list back.
+    section = dict(pop.database_sections(d)).get("MOST TOUCHED FILES")
+    check("the report section holds groups, not a flat string",
+          isinstance(section, list) and bool(section)
+          and isinstance(section[0], tuple), type(section).__name__)
+    if isinstance(section, list) and section:
+        listed = sum(len(rows) for _l, rows in section)
+        check("and it lists every file the store knows about",
+              listed == len(d["files"]), f"{listed} vs {len(d['files'])}")
+
+    # The SESSION report's own file section is a separate call site, and it is
+    # the one a mutation reverted while every check in this block passed.
+    own = dict(pop.session_sections(s)).get("FILES TOUCHED")
+    check("the session report's file section is grouped too",
+          isinstance(own, list) and bool(own)
+          and isinstance(own[0], tuple), type(own).__name__)
+    if isinstance(own, list) and own:
+        check("and it lists every file that session touched",
+              sum(len(r) for _l, r in own) == len(s["files"]),
+              f"{sum(len(r) for _l, r in own)} vs {len(s['files'])}")
+
     rendered = pop.format_database_report(d)
-    # The DISPLAYED ones -- the report shows the most-touched files, so the
-    # longest path by name may not appear in it at all. Testing an unrendered
-    # path passes for the wrong reason, which is how the first version of this
-    # check reported a truncation that was not there.
-    shown = [str(name) for name, _n in d["files"].most_common(14)]
-    clipped = [n for n in shown if len(n) > 46]
-    missing = [n for n in clipped if n[-20:] not in rendered]
-    check("no displayed path lost its tail", not missing,
-          f"lost the tail of {missing[0][-40:]!r}" if missing else
-          f"{len(clipped)} of {len(shown)} were clipped")
-    # The ellipsis is added at RENDER time by _short(), so the raw path does not
-    # contain one. Assert the rendered form: "…" plus the last 45 characters.
-    unshortened = [n for n in clipped
-                   if f"…{n[-(pop._short(n, 46).__len__() - 1):]}" not in rendered]
-    check("a clipped path is marked as shortened", not unshortened,
-          f"{unshortened[0][-40:]!r}" if unshortened else
-          f"{len(clipped)} clipped, all marked")
+    first_dir = groups[0][0].rstrip().rsplit("  —", 1)[0].rstrip("/")
+    check("the rendered report shows the directory in full",
+          first_dir in rendered, first_dir[:50])
+    check("and no filename row carries a full path again",
+          all(r.strip().startswith("/") is False
+              for _l, rows in groups for r in rows))
 
 print("\nlong sections start folded, short ones open")
 secs = pop.session_sections(s)
@@ -181,9 +231,16 @@ check("a window builds from sections", bool(win._expanders),
 check("every named section has one",
       len(win._expanders) == len(named), f"{len(win._expanders)} vs {len(named)}")
 for exp, (heading, body) in zip(win._expanders, named):
-    expected = len(body.splitlines()) <= pop.FOLD_AFTER_LINES
+    # Counted HERE, independently, rather than through the module's own helper.
+    # Asking _as_text() what the window should have decided moves both sides at
+    # once when it is wrong -- which is how a mutation that made _as_text count
+    # directory groups instead of file rows passed every check.
+    counted = (len(body.splitlines()) if isinstance(body, str)
+               else sum(len(rows) + 1 for _label, rows in body))
+    expected = counted <= pop.FOLD_AFTER_LINES
     check(f"{heading} starts {'open' if expected else 'folded'}",
-          exp.get_expanded() is expected)
+          exp.get_expanded() is expected,
+          f"{counted} lines, limit {pop.FOLD_AFTER_LINES}")
 check("at least one section is open, so the overview is readable",
       any(e.get_expanded() for e in win._expanders))
 check("a long section is folded when one exists",
@@ -206,7 +263,8 @@ copied = pop.report_text(pop.session_sections(s))
 check("every heading is in the copied text",
       all(h in copied for h, _b in named))
 check("and every body is too",
-      all(b.splitlines()[0] in copied for _h, b in named if b.strip()))
+      all(pop._as_text(b).splitlines()[0] in copied
+          for _h, b in named if pop._as_text(b).strip()))
 
 # Press the actual button rather than trusting report_text: _on_copy builds its
 # own string, and a version that dropped the sections would pass every check
@@ -236,6 +294,214 @@ check("and what it hands over is the whole report",
 check("not just the sections that happen to be open",
       sent.get("text") == copied,
       "the clipboard text differs from report_text()")
+
+print("\nrunning processes are read from /proc")
+procs = pop.running_processes()
+check("something running was found", bool(procs), f"{len(procs)} processes")
+if procs:
+    p0 = procs[0]
+    check("each has a pid", all(isinstance(p["pid"], int) and p["pid"] > 0
+                                for p in procs))
+    check("and a readable parent", all("ppid" in p for p in procs))
+    check("resident memory is a sane size, not vsize",
+          all(0 < p["rss_mb"] < 8000 for p in procs),
+          f"largest {max(p['rss_mb'] for p in procs):,.0f} MB")
+    check("cpu seconds are plausible", all(0 <= p["cpu_s"] for p in procs))
+    check("elapsed time is positive", all(p["elapsed_s"] > 0 for p in procs))
+    check("each is labelled in words, not by a command line",
+          all(p["label"] and len(p["label"]) < 30 for p in procs),
+          str([p["label"] for p in procs][:4]))
+    check("this test's own process is not listed as an OpenCode process",
+          not any("test-popup-stats" in p["cmd"] for p in procs))
+    # The shell that launched this suite has the repo path in its command line,
+    # so matching on the whole line reports it as OpenCode. Matching on the
+    # program is what prevents that, and this is the check for it.
+    shells = [p for p in procs
+              if Path(p["cmd"].split(" ", 1)[0]).name
+              in ("bash", "sh", "zsh", "fish", "grep", "python3")]
+    check("no shell or interpreter is reported as an OpenCode process",
+          not shells, str([p["cmd"][:44] for p in shells]))
+    check("they are ordered biggest first",
+          [p["rss_mb"] for p in procs] == sorted((p["rss_mb"] for p in procs),
+                                                 reverse=True))
+    rendered = pop.format_database_report(d)
+    check("the report shows the section", "RUNNING PROCESSES" in rendered)
+    check("with the pids in it",
+          all(f"{p['pid']:,}" in rendered for p in procs[:3]),
+          "a pid is missing from the rendered report")
+
+print("\nthe machine is described, not guessed at")
+env = pop.environment_stats(store)
+check("the display session type is reported", bool(env.get("session_type")))
+check("the GTK scale is reported", "gdk_scale" in env, str(env.get("gdk_scale")))
+check("locale is judged utf-8 or not", isinstance(env["locale_utf8"], bool))
+
+# Tested against a patched environment rather than against this machine, which
+# is already UTF-8: checking the live value only proves it is true here, and a
+# function that always returned True would pass that on every box but a broken
+# one. LC_ALL wins over LANG, which is what makes a C locale reachable.
+_saved_locale = {k: os.environ.get(k) for k in ("LC_ALL", "LC_CTYPE", "LANG")}
+
+
+def _with_locale(**kw):
+    for key, value in kw.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        return pop._utf8_locale()
+    finally:
+        for key, value in _saved_locale.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+check("a C locale is recognised as not utf-8",
+      _with_locale(LC_ALL=None, LC_CTYPE=None, LANG="C") is False)
+check("a latin-1 locale is recognised as not utf-8",
+      _with_locale(LC_ALL=None, LC_CTYPE=None, LANG="en_US.ISO-8859-1") is False)
+check("a UTF-8 locale is recognised",
+      _with_locale(LC_ALL=None, LC_CTYPE=None, LANG="en_US.UTF-8") is True)
+check("LC_ALL overrides LANG",
+      _with_locale(LC_ALL="C", LC_CTYPE=None, LANG="en_US.UTF-8") is False)
+check("no locale at all is not assumed to be utf-8",
+      _with_locale(LC_ALL=None, LC_CTYPE=None, LANG=None) is False)
+not_utf8 = dict(env, locale_utf8=False)
+check("a non-utf8 locale is called out in the report, not hidden",
+      "NOT utf-8" in "\n".join(pop._environment_lines(not_utf8)))
+check("and a utf-8 locale is reported as such",
+      "utf-8" in "\n".join(pop._environment_lines(env))
+      and "NOT utf-8" not in "\n".join(pop._environment_lines(env)))
+check("the desktop app version is read",
+      env.get("desktop app") not in (None, "", "not readable"),
+      str(env.get("desktop app")))
+# Compared against the file, not against "looks like a version" -- hardcoding
+# a plausible number passes a presence check and reports skew that is not there.
+try:
+    _pkg = json.loads(Path("/usr/lib/opencode-desktop/package.json").read_text())
+    check("and it matches the desktop app's own package.json",
+          env.get("desktop app") == _pkg.get("version"),
+          f"report {env.get('desktop app')} vs package {_pkg.get('version')}")
+except (OSError, ValueError):
+    print("  skip  desktop package.json not readable")
+check("the CLI the desktop app bundles is reported separately",
+      "cli the desktop app bundles" in env)
+
+# Pointed at fixtures rather than at this machine, whose three installs happen
+# to agree. Comparing them to each other passes forever while any one of them
+# is wrong; a fixture that disagrees does not.
+check("a version file is read verbatim",
+      pop._file_version(_write(tmp, "v.txt", "9.9.9\n")) == "9.9.9")
+check("a package.json has its version field read, not its whole text",
+      pop._file_version(_write(tmp, "p.json",
+                               '{"name": "x", "version": "1.2.3"}')) == "1.2.3")
+check("a missing file says so rather than reporting no version",
+      pop._file_version(str(tmp / "absent")) == "not readable")
+check("an unreadable file does not crash the report",
+      pop._file_version(_write(tmp, "bad.json", "{not json")) == "not readable")
+check("a file with no version reports unknown, not an empty line",
+      pop._file_version(_write(tmp, "nov.json", '{"name": "x"}')) == "unknown")
+check("each install reports its own number, not a shared one",
+      len({env["desktop app"], env["cli the desktop app bundles"]} |
+          {pop._file_version(_write(tmp, "other.txt", "0.0.1"))}) >= 2)
+try:
+    _cli = Path("/usr/lib/opencode-desktop/opencode-cli.version").read_text().strip()
+    check("the bundled CLI version matches its version file",
+          env.get("cli the desktop app bundles") == _cli,
+          f"report {env.get('cli the desktop app bundles')} vs file {_cli}")
+except OSError:
+    print("  skip  cli version file not readable")
+check("whatever opencode is on PATH is named",
+      env["opencode_on_path"] != "")
+check("both plugin scripts resolve to something",
+      set(env["scripts"]) == {"session-list-popup", "info-window"}
+      and all(v for v in env["scripts"].values()))
+check("memory is in MB and plausible",
+      0 < env.get("mem_total", 0) < 10_000_000, str(env.get("mem_total")))
+check("the schema is the one the store is reading", env["schema"] == store.table)
+
+print("\nthe environment section renders, and survives having no store")
+lines = pop._environment_lines(env)
+check("it carries display, versions and memory",
+      any("display" in l for l in lines)
+      and any("desktop app" in l for l in lines)
+      and any("memory" in l for l in lines))
+check("the report has an ENVIRONMENT section",
+      "ENVIRONMENT" in dict(pop.database_sections(d, store)))
+check("and says so when there is no store to describe",
+      "no store available" in str(
+          dict(pop.database_sections(d, None)).get("ENVIRONMENT")))
+
+print("\nmachine detail stays out of the per-session report")
+sec_names = {h for h, _ in pop.session_sections(s) if h}
+check("no ENVIRONMENT section on a session report",
+      "ENVIRONMENT" not in sec_names, str(sorted(sec_names)))
+check("no RUNNING PROCESSES section on a session report",
+      "RUNNING PROCESSES" not in sec_names)
+check("nothing about cpus, memory or usb on a session report",
+      not any(word in " ".join(sec_names)
+              for word in ("ENVIRONMENT", "PROCESS", "MACHINE", "USB")))
+
+print("\nusb ports are read from sysfs")
+ports = pop.usb_links()
+check("it returns a list", isinstance(ports, list), f"{len(ports)} ports")
+
+# Worked out from sysfs independently, because a list checked against itself
+# is empty and therefore always true.
+sysfs = Path("/sys/bus/usb/devices")
+expected = set()
+if sysfs.is_dir():
+    for entry in sysfs.iterdir():
+        if not entry.is_dir() or entry.name.startswith("usb"):
+            continue
+        if (entry / "speed").exists() or any(
+                (e / "speed").exists() for e in entry.iterdir() if e.is_dir()):
+            expected.add(entry.name.split(":")[0])
+check("every port sysfs knows about is listed",
+      {p["port"] for p in ports} == expected,
+      f"{sorted({p['port'] for p in ports})} vs sysfs {sorted(expected)}")
+
+if ports:
+    check("controller roots are not listed as devices",
+          not any(p["port"].startswith("usb") for p in ports),
+          str([p["port"] for p in ports]))
+    check("each port has a speed and a named generation",
+          all(p["mbps"] > 0 and p["kind"] for p in ports))
+    check("no port is listed twice",
+          len({p["port"] for p in ports}) == len(ports))
+    check("a 480 Mbps port is called USB 2.0",
+          next((p["kind"] == "USB 2.0" for p in ports if p["mbps"] == 480), True),
+          str([(p["mbps"], p["kind"]) for p in ports]))
+    check("a 5000 Mbps port is called USB 3.0",
+          next((p["kind"].startswith("USB 3") for p in ports
+                if p["mbps"] >= 5000), True))
+
+    # A mounted USB disk must be attributed to its port. Found independently,
+    # because deriving the expectation from the ports that DO carry a disk
+    # makes the check pass when none do.
+    mounted_usb = set()
+    for link in sorted(Path("/sys/class/block").glob("*")):
+        if link.name.startswith(("loop", "ram", "zram", "dm-")):
+            continue
+        try:
+            resolved = str(link.resolve())
+        except OSError:
+            continue
+        if "/usb" in resolved and link.name:
+            mounted_usb.add(link.name)
+    if mounted_usb:
+        named = {p.get("block") for p in ports if p.get("block")}
+        check("a mounted usb disk is attributed to the port it sits on",
+              bool(named & mounted_usb),
+              f"disks {sorted(mounted_usb)} not attributed; ports name {sorted(n for n in named if n)}")
+
+rendered_env = "\n".join(pop._environment_lines(env))
+check("and they appear in the report", ports and "usb ports" in rendered_env)
+check("with every port listed",
+      all(f"{p['mbps']:,} Mbps" in rendered_env for p in ports))
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for name in FAIL:

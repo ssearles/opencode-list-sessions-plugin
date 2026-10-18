@@ -80,6 +80,7 @@ import base64
 import datetime
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1009,16 +1010,24 @@ class StatsWindow(Gtk.Window):
         # One TextView per section rather than one for the lot, so folding a
         # section folds its text with it. They are inside a single scroller, so
         # the whole report still scrolls as one column.
+        #
+        # Content is a string for most sections and a list of
+        # (heading, rows) for the file lists, which get a nested expander per
+        # directory. That nested expander IS the dropdown for a long list: the
+        # directories and their totals are all visible, and the filenames under
+        # one are a click away, rather than 200 rows of paths to scroll past.
         self._expanders: list[Gtk.Expander] = []
         stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        for heading, body in sections:
+        for heading, content in sections:
             if not heading:
-                stack.pack_start(self._view(body), False, False, 0)
+                stack.pack_start(self._content(content), False, False, 0)
                 continue
             exp = Gtk.Expander(label=heading)
             exp.get_style_context().add_class("stat-section")
-            exp.set_expanded(len(body.splitlines()) <= FOLD_AFTER_LINES)
-            exp.add(self._view(body))
+            plain = _as_text(content)
+            exp.set_expanded(bool(plain) and len(plain.splitlines())
+                             <= FOLD_AFTER_LINES)
+            exp.add(self._content(content))
             stack.pack_start(exp, False, False, 0)
             self._expanders.append(exp)
 
@@ -1060,7 +1069,7 @@ class StatsWindow(Gtk.Window):
         view = Gtk.TextView()
         view.set_editable(False)
         view.set_cursor_visible(False)
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.set_wrap_mode(Gtk.WrapMode.NONE)
         view.set_left_margin(10)
         view.set_right_margin(10)
         view.set_top_margin(4)
@@ -1069,6 +1078,21 @@ class StatsWindow(Gtk.Window):
         view.get_style_context().add_provider(
             _report_provider(), Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         return view
+
+    def _content(self, content) -> Gtk.Widget:
+        """A TextView for text, or a folded group per directory for file lists."""
+        if isinstance(content, str):
+            return self._view(content)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        for label, rows in content:
+            # Each directory starts folded. Opened all at once it is the same
+            # wall of rows the grouping was meant to fix.
+            exp = Gtk.Expander(label=label)
+            exp.get_style_context().add_class("stat-group")
+            exp.set_expanded(False)
+            exp.add(self._view("\n".join(rows)))
+            box.pack_start(exp, False, False, 0)
+        return box
 
     def _set_all(self, expanded: bool) -> None:
         for exp in self._expanders:
@@ -1102,6 +1126,8 @@ def _report_provider() -> Gtk.CssProvider:
 REPORT_CSS = b"""
 textview { font-family: monospace; font-size: 11px; }
 expander.stat-section > box > label { font-weight: 700; font-size: 11px; }
+expander.stat-group > box > label { font-size: 10px; color: #444444; }
+expander.stat-group textview { font-size: 10px; }
 """
 
 
@@ -1133,7 +1159,350 @@ def _counter_rows(counter, limit: int = 12) -> list[str]:
     return out
 
 
-def session_sections(s: dict) -> list[tuple[str, str]]:
+def group_by_directory(paths) -> list[tuple[str, list[str]]]:
+    """
+    (directory heading, filename rows) pairs, heaviest directory first.
+
+    The flat form -- one truncated path per line -- was unreadable for a reason
+    worth recording. `_short` keeps the tail, so the leading `…` ate the part
+    that says WHICH PROJECT, and two rows both starting `…fault Project/` were
+    indistinguishable. A truncated path that cannot be told apart from another
+    truncated path is worse than a long one.
+
+    So the directory goes on its own line, in full, and the filenames sit under
+    it. That is also how you would say it out loud when asked what a session
+    touched.
+    """
+    groups: dict[str, Counter] = {}
+    for path, count in paths.items():
+        directory, _, name = str(path).rpartition("/")
+        groups.setdefault(directory or ".", Counter())[name] += count
+    out = []
+    for directory, names in sorted(groups.items(),
+                                   key=lambda kv: (-sum(kv[1].values()), kv[0])):
+        rows = [f"  {name:<46} {n:>6,}" for name, n in
+                sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))]
+        total = sum(names.values())
+        out.append((
+            f"{directory}/  —  {len(names)} file"
+            f"{'' if len(names) == 1 else 's'}, {total:,} touches",
+            rows,
+        ))
+    return out
+
+
+USB_CLASSES = (
+    (20000, "USB 3.2 Gen2x2"),
+    (10000, "USB 3.2 Gen2"),
+    (5000, "USB 3.0 / 3.2 Gen1"),
+    (480, "USB 2.0"),
+    (12, "USB 1.1"),
+    (1, "USB 1.0"),
+)
+
+
+def usb_links() -> list[dict]:
+    """
+    USB ports and the speed they negotiated, from sysfs.
+
+    Not an OpenCode stat, and worth saying so — but it is the answer to "why is
+    this file slow", which arrives looking exactly like "OpenCode is hanging".
+    A 3GB read off USB 2.0 takes minutes; off a 5Gbps port it takes seconds,
+    and nothing on screen tells you which of the two you have.
+
+    `lsusb -t` answers this too and is not installed. sysfs answers it without
+    a dependency, and `/sys/devices/.../2-2/.../block/sdb` carries the port in
+    the path, so a disk's port is a string operation rather than a second tool.
+
+    Controller roots are skipped: `usb1` and `usb2` report the controller's
+    maximum, not what anything plugged into it achieved, so listing them claims
+    a USB 3.0 port exists whether or not one is in use.
+    """
+    root = Path("/sys/bus/usb/devices")
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+
+    for entry in entries:
+        # `usbN` is a controller root: it reports the controller's maximum, not
+        # what anything plugged into it achieved, so listing it claims a USB 3.0
+        # port exists whether or not one is in use.
+        if not entry.is_dir() or entry.name.startswith("usb"):
+            continue
+        # A device is `bus-port` and its interfaces are `bus-port:iface`. The
+        # port carries the speed and the product; its interfaces usually repeat
+        # them. Take the port, once.
+        port_name = entry.name.split(":")[0]
+        if port_name in seen:
+            continue
+        # `speed` is required; `product` is not. Reading both inside one try
+        # discarded the whole port when a device had no product string --
+        # and FileNotFoundError is an OSError, so a USB 1.1 dongle that had a
+        # speed quietly vanished from the report because its name file was
+        # missing.
+        try:
+            speed = int((entry / "speed").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            product = (entry / "product").read_text().strip()
+        except OSError:
+            product = ""
+        seen.add(port_name)
+        out.append({
+            "port": port_name,
+            "mbps": speed,
+            "kind": next((label for floor, label in USB_CLASSES
+                          if speed >= floor), f"{speed} Mbps"),
+            "product": product or "(no product string)",
+        })
+
+    mounts: dict[str, str] = {}
+    try:
+        for line in Path("/proc/mounts").read_text().splitlines():
+            parts = line.split()
+            if len(parts) > 1 and parts[0].startswith("/dev/"):
+                mounts.setdefault(os.path.basename(parts[0]), parts[1])
+    except OSError:
+        pass
+
+    blocks = Path("/sys/class/block")
+    if blocks.is_dir():
+        try:
+            disks = sorted(blocks.glob("*"))
+        except OSError:
+            disks = []
+        for link in disks:
+            if link.name.startswith(("loop", "ram", "zram", "dm-")):
+                continue
+            try:
+                resolved = str(link.resolve())
+            except OSError:
+                continue
+            for port in out:
+                if f"/{port['port']}/" in resolved:
+                    port["block"] = link.name
+                    if link.name in mounts:
+                        port["mount"] = mounts[link.name]
+                    break
+    return out
+
+
+def _meminfo() -> dict:
+    """Total and available memory in MB, from /proc/meminfo."""
+    out: dict = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable", "SwapTotal"):
+                out[key] = int(rest.split()[0]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def _utf8_locale() -> bool:
+    """
+    Whether the locale can represent the characters in a session title.
+
+    Not academic: titles here contain typographic apostrophes, and a C locale
+    turns them into replacement characters in a transcript and a `?` in a
+    heading. Cheap to check and it explains a class of ugly output on someone
+    else's machine.
+    """
+    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
+        value = os.environ.get(name)
+        if value:
+            return "utf-8" in value.lower() or "utf8" in value.lower()
+    return False
+
+
+def _file_version(path: str) -> str:
+    """
+    A version read from a file, for the installations skew shows up in.
+
+    Its own function because the whole point of the report is that these are
+    three separate numbers from three separate files, and reading them inline
+    meant the only way to test it was to compare them against the machine's own
+    -- where they happen to agree. A helper takes a path, so a test can point
+    it at a fixture that disagrees.
+    """
+    try:
+        text = Path(path).read_text()
+        if path.endswith(".json"):
+            version = str(json.loads(text).get("version", ""))
+        else:
+            version = text.strip()
+    except (OSError, ValueError):
+        return "not readable"
+    return version or "unknown"
+
+
+def environment_stats(store: Store) -> dict:
+    """
+    The machine this OpenCode is running on, as far as it affects behaviour.
+
+    Everything here is one of two things: a **version skew** between the several
+    installations of OpenCode that coexist on one machine, or a **limit** the
+    machine imposes that a bigger session would hit. Neither shows up in
+    anything else in this report, and both are what "it works on my laptop"
+    turns out to have been.
+
+    Deliberately no `opencode --version` fork here. The version skew that
+    matters is between the desktop app, the CLI it bundles, and the CLI on PATH,
+    and the first two are readable from files. Forking mise to ask a shim takes
+    over a second, and a report window that takes a second to appear is a worse
+    trade than a version line that says "bundled".
+    """
+    env: dict = {
+        "session_type": os.environ.get("XDG_SESSION_TYPE", "unset"),
+        "wayland_display": os.environ.get("WAYLAND_DISPLAY", "unset"),
+        "display": os.environ.get("DISPLAY", "unset"),
+        "gdk_scale": os.environ.get("GDK_SCALE", "unset"),
+        "gdk_dpi": os.environ.get("GDK_DPI_SCALE", "unset"),
+        "locale_utf8": _utf8_locale(),
+        "lang": os.environ.get("LANG") or os.environ.get("LC_ALL") or "unset",
+        "cpus": os.cpu_count(),
+        "load": os.getloadavg() if hasattr(os, "getloadavg") else (0, 0, 0),
+    }
+
+    # Which installations exist. `command -v` finds the shim, not the binary,
+    # which is the point: a mise shim on PATH and the CLI bundled inside the
+    # desktop app are two installations that happen to agree today.
+    on_path = shutil.which("opencode")
+    env["opencode_on_path"] = on_path or "not found"
+    for label, path in (
+        ("desktop app", "/usr/lib/opencode-desktop/package.json"),
+        ("cli the desktop app bundles",
+         "/usr/lib/opencode-desktop/opencode-cli.version"),
+    ):
+        env[label] = _file_version(path)
+
+    # The scripts the plugins will actually run. A stale copy in ~/.local/bin
+    # tests stale code and reports nothing wrong, which has happened in this
+    # repo more than once.
+    resolved = {}
+    for name in ("session-list-popup", "info-window"):
+        path = Path.home() / ".local" / "bin" / name
+        try:
+            resolved[name] = str(path.resolve())
+        except OSError:
+            resolved[name] = "not installed"
+    env["scripts"] = resolved
+
+    mem = _meminfo()
+    if mem:
+        env["mem_total"] = mem.get("MemTotal")
+        env["mem_available"] = mem.get("MemAvailable")
+        env["swap_total"] = mem.get("SwapTotal")
+    try:
+        st = os.statvfs(store.path.parent)
+        env["disk_free_gb"] = st.f_bavail * st.f_frsize / 1073741824
+        env["disk_total_gb"] = st.f_blocks * st.f_frsize / 1073741824
+    except OSError:
+        pass
+
+    # Which schema is live decides which read path the popup took; a v1
+    # `session` table is not a problem, it is just a different code path.
+    env["schema"] = store.table
+    return env
+
+
+def _process_label(cmd: str) -> str:
+    """What this process IS, from its command line, in words."""
+    for needle, label in (
+        ("opencode-cli serve", "background service"),
+        ("session-list-popup", "session popup window"),
+        ("--type=gpu-process", "desktop gpu process"),
+        ("--type=renderer", "desktop renderer"),
+        ("utility-sub-type=network", "desktop network helper"),
+        ("utility-sub-type=audio", "desktop audio helper"),
+        ("--type=zygote", "desktop zygote"),
+        ("crashpad", "desktop crash handler"),
+        ("--type=", "desktop helper"),
+        ("electron", "desktop app"),
+    ):
+        if needle in cmd:
+            return label
+    return "other"
+
+
+def running_processes() -> list[dict]:
+    """
+    OpenCode processes running right now, read from /proc.
+
+    `/proc` rather than `ps` for three reasons: no fork, so asking the question
+    cannot spawn the thing it is reporting on; no output format to parse, which
+    differs between `ps` implementations and would make every column a string
+    and a hope; and only the caller's own processes are considered, so there are
+    no permission errors and nothing about another user on the machine leaks into
+    a window that gets copied out of.
+
+    `comm` may contain spaces and parentheses, so the fields after it are read
+    by splitting on the LAST `)` rather than on whitespace. Getting that wrong
+    shifts every column by one and produces a plausible, completely wrong RSS.
+    """
+    try:
+        clock = os.sysconf("SC_CLK_TCK")
+        page = os.sysconf("SC_PAGE_SIZE")
+        uptime = float(Path("/proc/uptime").read_text().split()[0])
+        uid = os.getuid()
+    except (OSError, ValueError, AttributeError):
+        return []
+
+    out: list[dict] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            argv = [a.decode("utf8", "ignore") for a in argv if a]
+            if not argv:
+                continue
+            # Match the PROGRAM, not anywhere in the line.
+            #
+            # Matching the whole command line finds every shell, editor, grep
+            # and test runner that merely MENTIONS an opencode path. A shell
+            # whose command line was `cd .../opencode-session-transcript && ...`
+            # was reported as an OpenCode process, which is worse than useless.
+            # The executable answers "what is this running", which is the
+            # question actually being asked.
+            try:
+                exe = os.readlink(entry / "exe")
+            except OSError:
+                exe = argv[0]
+            program = os.path.basename(exe)
+            named = os.path.basename(argv[0])
+            if not ("opencode" in program or "electron" in program
+                    or "opencode" in named or "session-list-popup" in named):
+                continue
+            cmd = " ".join(argv)
+            raw = (entry / "stat").read_text()
+            fields = raw[raw.rindex(")") + 2:].split()
+            ppid = int(fields[1])
+            cpu = (int(fields[11]) + int(fields[12])) / clock
+            rss = int(fields[21]) * page / 1048576
+            started = uptime - int(fields[19]) / clock
+        except (OSError, ValueError, IndexError):
+            # A process can exit between the check and the read. That is the
+            # normal case when scanning, not an error worth reporting.
+            continue
+        out.append({
+            "pid": int(entry.name), "ppid": ppid, "rss_mb": rss,
+            "cpu_s": cpu, "elapsed_s": started,
+            "label": _process_label(cmd), "cmd": cmd,
+        })
+    return sorted(out, key=lambda p: -p["rss_mb"])
+
+
+def session_sections(s: dict) -> list[tuple[str, object]]:
     """One session, as (heading, body) pairs -- the sections the window folds."""
     if not s:
         return [("", "No such session.")]
@@ -1179,14 +1548,70 @@ def session_sections(s: dict) -> list[tuple[str, str]]:
             f"  {kind:<12} {count:,}" for kind, count in
             sorted(s["kinds"].items(), key=lambda kv: -kv[1]))),
         ("TOOLS", "\n".join(_counter_rows(s["tools"]))),
-        ("FILES TOUCHED", "\n".join(_counter_rows(s["files"], 15))),
+        ("FILES TOUCHED", group_by_directory(s["files"])),
         ("MODELS", "\n".join(_counter_rows(s["models"]))),
         ("SESSION", "\n".join(tail)),
     ]
 
 
-def database_sections(d: dict) -> list[tuple[str, str]]:
-    """The whole store, as (heading, body) pairs."""
+def _environment_lines(env: dict) -> list[str]:
+    """The machine, as the lines the report shows."""
+    lines = [
+        f"  {'display':<22} {env['session_type']}"
+        f"   WAYLAND_DISPLAY={env['wayland_display']}"
+        f"   DISPLAY={env['display']}",
+        f"  {'gtk scale':<22} GDK_SCALE={env['gdk_scale']}"
+        f"   GDK_DPI_SCALE={env['gdk_dpi']}",
+        f"  {'locale':<22} {env['lang']}"
+        f"   {'utf-8' if env['locale_utf8'] else 'NOT utf-8, titles show ?'}",
+        "",
+        f"  {'desktop app':<22} {env['desktop app']}",
+        f"  {'cli it bundles':<22} {env['cli the desktop app bundles']}",
+        f"  {'opencode on PATH':<22} {env['opencode_on_path']}",
+        f"  {'database schema':<22} {env['schema']}",
+        "",
+        f"  {'cpus / load':<22} {env['cpus']}"
+        f"   load {env['load'][0]:.1f} {env['load'][1]:.1f} {env['load'][2]:.1f}",
+    ]
+    if env.get("mem_total"):
+        lines.append(
+            f"  {'memory':<22} {env['mem_total']:,} MB total"
+            f"   {env['mem_available']:,} MB available"
+            f"   swap {env.get('swap_total', 0):,} MB")
+    if env.get("disk_free_gb"):
+        lines.append(
+            f"  {'disk holding the db':<22} {env['disk_free_gb']:,.0f} GB free"
+            f" of {env['disk_total_gb']:,.0f} GB")
+    lines += ["", "  scripts the plugins will run:"]
+    for name, path in env["scripts"].items():
+        lines.append(f"    {name:<20} {_short(path, 56)}")
+
+    # USB, because slow I/O looks exactly like a hung agent. A drive on a 480
+    # Mbps port is a dozen times slower than the same drive on a 5Gbps port,
+    # and nothing in the session report can tell them apart.
+    ports = usb_links()
+    if ports:
+        lines += ["", "  usb ports, at the speed they actually negotiated:"]
+        for port in ports:
+            where = ""
+            if port.get("mount"):
+                where = f"  →  {port['block']} at {port['mount']}"
+            elif port.get("block"):
+                where = f"  →  {port['block']}"
+            lines.append(
+                f"    {port['port']:<6} {port['mbps']:>6,} Mbps"
+                f"  {port['kind']:<24} {port['product']}{where}")
+    return lines
+
+
+def database_sections(d: dict, store: "Store | None" = None) -> list[tuple[str, object]]:
+    """
+    The whole store, as (heading, body) pairs.
+
+    `store` is optional so an empty report still renders -- the tests pass `{}`
+    and must get "No sessions found." rather than a crash on the environment
+    probe, which needs a real path to ask about disk.
+    """
     if not d:
         return [("", "No sessions found.")]
     tok = d["tokens"]
@@ -1199,6 +1624,31 @@ def database_sections(d: dict) -> list[tuple[str, str]]:
         f"  {_mb(d['backups_bytes']):>12}   snapshots kept"
         f" ({d['backups_count']}), which archiving does not touch",
     ]
+    # Live processes belong here and not on a session row: they are a property
+    # of the machine, not of any one conversation. Useful on its own -- the
+    # background service outlives the desktop window that spawned it -- and it
+    # is the one figure in this report that is not about the database at all.
+    procs = running_processes()
+    proc_lines = [
+        f"  {len(procs):>3} processes, {sum(p['rss_mb'] for p in procs):,.0f} MB"
+        f" resident in total",
+        "",
+        f"  {'pid':>7} {'ppid':>7} {'rss MB':>8} {'cpu s':>8} {'up':>9}  what",
+    ]
+    for p in procs:
+        proc_lines.append(
+            f"  {p['pid']:>7,} {p['ppid']:>7,} {p['rss_mb']:>8,.0f}"
+            f" {p['cpu_s']:>8,.0f} {_dur(p['elapsed_s'] * 1000):>9}  {p['label']}")
+
+    # The machine. Not decoration: everything here is a version skew between the
+    # several OpenCode installations one machine tends to accumulate, or a limit
+    # that a bigger session would hit. Neither is visible anywhere else in this
+    # report, and both are what "it only misbehaves on my laptop" is made of.
+    env = environment_stats(store) if store is not None else {}
+    if env:
+        env_lines = _environment_lines(env)
+    else:
+        env_lines = ["  (no store available to describe the machine)"]
     largest = [f"  {_mb(size):>10}  {title}" for _sid, (title, size) in biggest]
     span = []
     if created[0]:
@@ -1207,6 +1657,8 @@ def database_sections(d: dict) -> list[tuple[str, str]]:
 
     return [
         ("ON DISK", "\n".join(size_lines)),
+        ("ENVIRONMENT", "\n".join(env_lines)),
+        ("RUNNING PROCESSES", "\n".join(proc_lines)),
         ("CONTENTS", "\n".join([
             f"  {d['sessions']:>12,}   sessions, {d['archived']:,} archived",
             f"  {d['messages']:>12,}   messages",
@@ -1220,7 +1672,7 @@ def database_sections(d: dict) -> list[tuple[str, str]]:
         ])),
         ("LARGEST SESSIONS", "\n".join(largest)),
         ("TOOLS, ALL SESSIONS", "\n".join(_counter_rows(d["tools"], 14))),
-        ("MOST TOUCHED FILES", "\n".join(_counter_rows(d["files"], 14))),
+        ("MOST TOUCHED FILES", group_by_directory(d["files"])),
         ("MODELS", "\n".join(_counter_rows(d["models"]))),
         ("MESSAGES BY KIND", "\n".join(
             f"  {kind:<12} {count:,}" for kind, count in
@@ -1235,10 +1687,25 @@ def database_sections(d: dict) -> list[tuple[str, str]]:
 FOLD_AFTER_LINES = 12
 
 
-def report_text(sections: list[tuple[str, str]]) -> str:
+def _as_text(content) -> str:
+    """
+    Flatten section content to text, whatever shape it arrived in.
+
+    Two callers need the same answer: the fold decision, which wants a line
+    count, and Copy, which wants the whole report. A file section is a list of
+    groups rather than a string, and calling `.splitlines()` on it would either
+    crash or quietly count the groups instead of the rows.
+    """
+    if isinstance(content, str):
+        return content
+    return "\n".join(f"{label}\n" + "\n".join(rows) for label, rows in content)
+
+
+def report_text(sections: list[tuple[str, object]]) -> str:
     """Every section as plain text -- what Copy puts on the clipboard."""
     return "\n\n".join(
-        f"{heading}\n{body}" if heading else body for heading, body in sections)
+        f"{heading}\n{_as_text(content)}" if heading else _as_text(content)
+        for heading, content in sections)
 
 
 def format_session_report(s: dict) -> str:
@@ -2002,7 +2469,7 @@ class Window(Gtk.Window):
         """
         report = StatsWindow(
             "OpenCode database",
-            database_sections(database_stats(self.store)),
+            database_sections(database_stats(self.store), self.store),
             f"{self.store.path}",
         )
         report.show_all()

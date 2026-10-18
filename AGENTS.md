@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (131) + the three popup suites (134 checks)
+npm test          # node --test test/ (151) + the five popup suites (332 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -303,7 +303,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
-| `popup/test-popup-stats.py` | 60 | Per-session and whole-store figures, section folding, the Copy path |
+| `popup/test-popup-stats.py` | 122 | Per-session and whole-store figures, section folding, the Copy path, the environment probe, USB ports |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
 | `popup/test-info-save.py` | 23 | Save naming, timestamp collisions, markdown vs text output |
 | `popup/test-copy-gesture.py` | 8 | Select-then-Ctrl+C survives the window closing |
@@ -484,6 +484,124 @@ ten days and was worked on for hours.
 by name. A report whose numbers sit under a scrollbar of file paths is a report
 nobody reads the numbers of. Copy sends `report_text()`, so the clipboard
 carries the folded sections too.
+
+### Files Are Grouped By Directory, Not Listed As Truncated Paths
+The flat form — one path per line, trimmed from the left — was unreadable.
+`_short` keeps the tail, so the leading `…` ate the part naming WHICH PROJECT,
+and two rows both opening `…fault Project/` were indistinguishable. **A truncated
+path that cannot be told apart from another truncated path is worse than a long
+one.** It was also capped at 15 rows with an "and N more".
+
+So: the directory on its own line **in full**, filenames indented beneath, and
+**every** file shown. Each directory is a nested `Gtk.Expander`, folded by
+default — that is the dropdown for a long list, so the directories and their
+totals are all visible without scrolling past 200 rows.
+
+`group_by_directory()` returns that shape, so section content is now *either* a
+string or a list of groups. `_as_text()` flattens both, for the fold rule and for
+Copy, which sends every section whether open or folded.
+
+### Running Processes
+A **RUNNING PROCESSES** section in the database report: pid, ppid, RSS, CPU
+seconds, uptime, and what each process *is* in words. It belongs there and not
+on a session row because it is a property of the machine, not of a conversation.
+
+**Match the PROGRAM, not the command line.** Matching the whole line reported
+every shell, editor and test runner that merely *mentions* an opencode path —
+this suite's own launcher, `cd .../opencode-session-transcript && ...`, came
+back as an OpenCode process. `/proc/<pid>/exe` answers "what is this running",
+which is the question actually being asked. Only the caller's own processes are
+read, so there are no permission errors and nothing about another user leaks
+into a window that gets copied out.
+
+Two `/proc` traps, both producing plausible nonsense rather than errors: `comm`
+may contain spaces and parentheses, so fields are read by splitting on the
+**last** `)` — whitespace-splitting shifts every column by one; and `rss` is
+**pages**, not bytes, while its neighbour `vsize` is bytes. Reading `vsize`
+reported 17,592,186,044,416 MB.
+
+### Everything Machine-Specific Lives In The Footer Report
+The **ENVIRONMENT** section — display server, GTK scale, locale, three install
+versions, schema, CPU/load, memory, disk, the resolved script paths — sits in
+the bottom **Database** button, never on a session row. Same reasoning as RUNNING
+PROCESSES: CPUs and memory are properties of the machine, and a per-row button
+for them would claim a session caused them.
+
+`test-popup-stats.py` asserts that by checking the session report's section
+*names* for `ENVIRONMENT` / `PROCESS` / `MACHINE` / `USB`, and that adding
+either section to `session_sections()` fails the check. A test that only asserted
+the section exists would pass while it was also on the wrong report.
+
+It found a real skew on this machine: `opencode` on PATH is a **mise shim**
+while the desktop app **bundles its own CLI**. Both read 2.0.24 today, and
+`shutil.which` returns the shim rather than the binary — so the version lines
+that say "these agree" agree about the wrong file if they ever diverge. The
+report names both paths for that reason.
+
+**Deliberately no `opencode --version` fork.** The probe is on the button-
+click path and a mise shim costs over a second before it prints anything. The
+skew that matters is between the desktop app, its bundled CLI and the one on
+PATH, all three of which have a **file** to read.
+
+`_utf8_locale()` and `_file_version()` are separate functions so tests can point
+them at fixtures. Checked against the live machine instead, every locale and
+version assertion passes forever on a box where all three installs agree — which
+is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
+`_file_version()` was inline in `environment_stats()` until the mutation run
+forced the extraction; that is the only reason it exists.
+
+### USB Ports, Because Slow I/O Looks Like A Hung Agent
+Not an OpenCode stat — and worth saying so. It is the answer to "why is this
+file slow", which arrives wearing the same clothes as "OpenCode is hanging": a
+large read off a 480 Mbps port takes an order of magnitude longer than off a
+5 Gbps one, and nothing in a session report distinguishes them.
+
+`lsusb -t` answers this and is not installed. `/sys/bus/usb/devices/*/speed`
+does, without a dependency, and a disk's port is a string match:
+`/sys/devices/.../2-2/.../block/sdb` carries the port in the path.
+
+Three sysfs traps, all of which produced a *plausible* wrong answer:
+
+- **Controller roots report the maximum, not the achievement.** `usb1` and
+  `usb2` read 480 and 5000 Mbps regardless of what is plugged in, so listing
+  them claims a USB 3.0 port exists whether or not one is in use. Skip `usbN`.
+- **A device's interfaces repeat the device.** `1-4` and `1-4:1.0` are one port;
+  take `name.split(":")[0]` and dedupe, or the webcam is listed twice.
+- **The first filter asked for a `:` in the name**, which excludes exactly the
+  entries wanted — the *device* `2-2` has no interface suffix. Only the
+  interfaces have colons. That shipped, and the surviving mutation pass is what
+  found it.
+
+And the one that mattered most: **reading `speed` and `product` in one `try`
+silently dropped a port whose product string file was absent.** `FileNotFoundError`
+is an `OSError`, so the whole entry went, taking a real 12 Mbps device with it.
+`speed` is required; `product` is optional and defaults to a placeholder.
+
+### What The Mutation Runs Keep Finding
+Four checks in `test-popup-stats.py` passed against wrong code: they asked the
+module's own helper for the answer, or checked the database report when the
+mutation had touched the session report. A fold-rule test written as
+`len(_as_text(body).splitlines())` moves both sides at once when `_as_text` is
+what is broken.
+
+The USB and environment work added three more of the same kind, and all three
+were **tautological or machine-local**:
+
+- deriving the expected USB disks from `ports` that already carry a disk makes
+  the check pass when *none* do — it is empty and `all([])` is true. The
+  expectation is now worked out from `/sys/class/block` independently.
+- "the version is not empty" passes for a hardcoded `"2.0.24"`, which is
+  exactly the version this machine has. Now compared against the real files.
+- a locale check run against the live environment only proves it is true *here*.
+  Now patched to `LANG=C`, `LC_ALL=C`, unset, and UTF-8 in turn.
+
+**A check whose expectation is computed from the thing under test is empty, and
+empty is always true.** That is the one pattern to look for first.
+
+And **a crash counts as caught.** Grepping stdout for `FAIL` alone reported a
+suite that died with a traceback as a mutation surviving — which is why the
+process-matching regression looked like several survivors when the suite had in
+fact caught it loudly. `mutate_stats3.py` checks the exit code as well.
 
 ### Two bugs this shipped with, both now pinned
 The first cut **rendered perfectly while being wrong twice**, which is the whole
