@@ -1048,12 +1048,15 @@ def main():
         # the source, so this is what a user would actually see.
         banner_text = ""
         found_labels = 0
+        banner_label = None
 
         def walk_banner(w):
-            nonlocal banner_text, found_labels
+            nonlocal banner_text, found_labels, banner_label
             if isinstance(w, Gtk.Label):
                 found_labels += 1
                 if "banner-hint" in w.get_style_context().list_classes():
+                    if banner_label is None:
+                        banner_label = w
                     banner_text += (w.get_text() or "") + "\n"
             if isinstance(w, Gtk.Container):
                 for ch in w.get_children():
@@ -1070,7 +1073,7 @@ def main():
         stripped = " ".join(banner_text.split())
         # A lookahead, not a bare `.` -- "Transcript.md" has a period in the middle of
         # it, so the first version of this truncated at "Transcript."
-        m = re.search(r"open its buttons:(.*?)\.(?=\s|$)", stripped)
+        m = re.search(r"(?:open|for) its buttons:(.*?)\.(?=\s|$)", stripped)
         check("the button list is found in the banner", m is not None,
               stripped[:140])
         button_list = m.group(1) if m else ""
@@ -1084,12 +1087,48 @@ def main():
         # prose rather than a list.
         check("it explains the footer Database button", "Database" in banner_text)
         check("and says the reports are read-only", "read-only" in banner_text)
-        # Keyed on what only that paragraph says. Checking for "machine" was
-        # satisfied by "this machine's environment" in the sentence above, so
-        # deleting the whole paragraph passed it.
-        check("and says what the machine report adds",
-              re.search(r"usb|3\.0|cpu|laptop", banner_text, re.I) is not None,
-              "the banner should say Database covers cpu/laptop/usb")
+        check("and names the footer Database button", "Database" in banner_text)
+
+        # The banner must not dictate the window's width. It did: three long
+        # unwrapped paragraphs made the label request more than the 1100px
+        # default, and set_default_size loses to any child that asks for more.
+        # banner_label is captured by walk_banner above.
+        check("the banner label is found", banner_label is not None)
+        if banner_label is not None:
+            check("it wraps rather than asking for one long line",
+                  banner_label.get_line_wrap(),
+                  "an unwrapped label's natural width becomes the window width")
+            check("and its wrap width is capped",
+                  0 < banner_label.get_width_chars() <= 200,
+                  f"width_chars={banner_label.get_width_chars()}")
+            check("so the banner cannot widen the window past the default",
+                  0 < banner_label.get_max_width_chars() <= 200,
+                  f"max_width_chars={banner_label.get_max_width_chars()}")
+
+        # The invariant, rather than a proxy for it. BANNER_COLS is tuned to the
+        # default font, so asserting the constant would only prove the constant
+        # did not change.
+        #
+        # This is the check that was missing when a five-paragraph banner
+        # opened the window at 2092px on a 1366px screen: every existing test
+        # passed while the window was unusable.
+        _screen = Gdk.Screen.get_default()
+        _sw, _sh = _screen.get_width(), _screen.get_height()
+        _win_w, _win_h = win.get_size()
+        check("the window fits the screen horizontally",
+              _win_w <= _sw, f"{_win_w}px wide on a {_sw}px screen")
+        check("and vertically", _win_h <= _sh, f"{_win_h}px tall on a {_sh}px screen")
+        check("and is not needlessly narrow",
+              _win_w >= _sw * 0.5, f"{_win_w}px on a {_sw}px screen")
+
+        # The banner is guidance for a window you drive with the mouse. It
+        # grew to five paragraphs once and was cut back; this stops it growing
+        # into a manual again.
+        paragraphs = [p for p in banner_text.split("\n\n") if p.strip()]
+        check("the banner is not a manual", len(paragraphs) <= 4,
+              f"{len(paragraphs)} paragraphs")
+        check("and is not so long that it needs the window to grow",
+              len(stripped) < 600, f"{len(stripped)} chars")
 
         print("\nthe real database was not modified by this run")
         # Compare against the state captured at the start, not against "no

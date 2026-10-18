@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (157) + the five popup suites (381 checks)
+npm test          # node --test test/ (157) + the five popup suites (390 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -299,7 +299,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 149 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner's button list |
+| `popup/test-popup-gui.py` | 158 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, and that the window fits the screen |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
@@ -555,6 +555,46 @@ version assertion passes forever on a box where all three installs agree — whi
 is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
+
+### The Banner Sized The Window, And No Test Measured The Window
+A five-paragraph banner opened this window at **2092px on a 1366px screen**.
+`set_default_size(min(1100, …))` is only a *default* — **any child requesting
+more wins**, and an unwrapped `Gtk.Label` asks for its longest line. The banner
+was prose, so the banner was the widest widget in the window.
+
+The banner is now four short paragraphs with `set_line_wrap(True)` and
+`BANNER_COLS` set on the label. 150 puts the natural width at ~1078px, which
+agrees with the default instead of overriding it.
+
+**Measured across three states, because the constant is tuned to the font:**
+
+| State | Width | |
+|---|---|---|
+| before the stats banner | 1181 | fits |
+| the long banner | **2092** | overflows |
+| short banner, 96 cols | 700 | fits, too narrow |
+| short banner, 150 cols | 1078 | fits |
+
+The check that was missing is the one that matters, and it is not about the
+constant:
+
+```python
+check("the window fits the screen horizontally", _win_w <= _sw,
+      f"{_win_w}px wide on a {_sw}px screen")
+```
+
+Asserting `BANNER_COLS` would only prove the constant did not change. Run
+against `ebfc714`'s popup, this fails with *"2092px wide on a 1366px screen"* —
+which is every test having passed while the window was unusable.
+
+Two smaller guards alongside it: the banner may not exceed four paragraphs or
+600 characters, and the window may not be under half the screen width. The
+second exists because removing the wrap from the *short* banner narrows the
+window to 664px — the same property, failing the other way.
+
+The banner is guidance for a window you drive with the mouse. It grew into a
+manual once and was cut back; the paragraph and length checks stop it doing that
+again.
 
 ### Four Places Enumerate The Window's Buttons, And They Drifted
 The window's banner, the palette line, `popupOpenedNote()` and the row strip
