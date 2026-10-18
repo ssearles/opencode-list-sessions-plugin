@@ -431,6 +431,86 @@ function inventory(all: SessionRow[], limit = 60): string {
 }
 
 /**
+ * Frame a report as a status note rather than a request.
+ *
+ * `ctx.session.synthetic()` posts a **user** message. OpenCode's own plugin API
+ * calls it a "synthetic user message" (@opencode-ai/plugin, the compaction
+ * autocontinue hook), so whatever a command writes here is read by the agent as
+ * something it was asked to do.
+ *
+ * `/list_sessions` used to end with "Right-click a session there to get its
+ * buttons: Archive or Restore, Transcript.md, …", which on a fresh session read
+ * as an instruction to go and work the popup. The agent went looking for the
+ * window, and because a re-run of the command posts this same note again, each
+ * attempt fed the next one — a loop with no exit, on a command whose only job is
+ * to open a window.
+ *
+ * The guard is text, not a mechanism. A plugin cannot post into a session
+ * without the model seeing it, so it has to be said plainly enough to survive
+ * being read as a request: what kind of message this is, that there is nothing
+ * to answer, and that the window is not the agent's to inspect.
+ *
+ * The same string goes to the session log, where it reads as what it is — a
+ * note the command left behind.
+ */
+function statusNote(body: string): string {
+  return [
+    "**Status — no action needed.** This is a report from `/list_sessions`, " +
+      "not a request: reply to nothing, run nothing, and do not go looking " +
+      "for the session window. Anything the user wants done to a session, they " +
+      "will ask for.",
+    "",
+    body,
+  ].join("\n")
+}
+
+/**
+ * `/list_sessions` when the window opened. Says so and stops.
+ *
+ * The window's contents are the user's to work with the mouse, which is worth
+ * stating explicitly: "Right-click a row …" was the sentence that read as a
+ * task, and saying who does the clicking is what stops it.
+ */
+function popupOpenedNote(): string {
+  return statusNote(
+    [
+      "**Opened the session popup window.**",
+      "",
+      "It lists every session — unarchived first, then archived, each section " +
+        "sorted by name. The user drives it with the mouse: right-click a row " +
+        "for that session's buttons, Archive or Restore, Transcript.md, " +
+        "Export .json, Delete, and Close to back out without writing anything.",
+      "",
+      "`/list_sessions --text` prints the same list into the conversation " +
+        "instead of opening a window.",
+    ].join("\n"),
+  )
+}
+
+/**
+ * `/list_sessions` when the window would not open.
+ *
+ * Guarded like the success branch, and for a sharper reason: "could not open
+ * the window, here is why" is the shape of message an agent tries to *fix* —
+ * install the missing binary, retry the launch — which then reports failure
+ * again. The reason is still reported, because a person reading it may want it.
+ */
+function popupFailedNote(reason: string, rows: SessionRow[]): string {
+  return statusNote(
+    [
+      `**The popup window did not open:** ${reason}`,
+      "",
+      "The list is printed here instead, so the sessions below are real rather " +
+        "than a promise. Archive, restore, delete and export live in that " +
+        "window when it is available; the `session_archive` tools work without " +
+        "it, and so does a transcript of any session.",
+      "",
+      inventory(rows),
+    ].join("\n"),
+  )
+}
+
+/**
  * Resolve a bare 1-based index against a list, as typed in response to a menu.
  *
  * Only digits are treated as a position, so an id or title fragment always
@@ -645,26 +725,8 @@ export default {
             await say(
               sessionID,
               launched.ok
-                ? [
-                    "Opened the session popup window.",
-                    "",
-                    "Right-click a session there to get its buttons: Archive " +
-                      "or Restore, Transcript.md, Export .json, Delete, and " +
-                      "Close to back out without doing anything. Unarchived " +
-                      "sessions are listed first, each section sorted by name.",
-                    "",
-                    "`/list_sessions --text` prints the same list as text instead.",
-                  ].join("\n")
-                : [
-                    `Could not open the popup window: ${launched.reason}`,
-                    "",
-                    "Printing the list as text instead. Archive, restore, delete and " +
-                      "export are in the popup window when it is available; " +
-                      "the `session_archive` tools still work without it, " +
-                      "and so does a transcript of any session.",
-                    "",
-                    inventory(await (await store()).list()),
-                  ].join("\n"),
+                ? popupOpenedNote()
+                : popupFailedNote(launched.reason, await (await store()).list()),
             )
           } catch (err) {
             await say(sessionID, `Error: ${err instanceof Error ? err.message : String(err)}`)
@@ -959,3 +1021,7 @@ export const __pickByNumber = pickByNumber
 export const __inventory = inventory
 /** Exposed for tests: prompt-text argument parsing. */
 export const __parseArgs = parseArgs
+/** Exposed for tests: the status framing, and both `/list_sessions` reports. */
+export const __statusNote = statusNote
+export const __popupOpenedNote = popupOpenedNote
+export const __popupFailedNote = popupFailedNote

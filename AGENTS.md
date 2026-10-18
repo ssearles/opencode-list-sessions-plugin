@@ -200,6 +200,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/naming.test.ts` | 4 | User-facing text names only registered commands |
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
+| `test/status.test.ts` | 11 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 | `popup/test-popup-gui.py` | 84 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
 | `popup/test-popup-writes.py` | 51 | The write path: archive/restore guards, delete, backups, ordering, images |
@@ -333,9 +334,47 @@ Watch for the trap it walks into: `archive` and `unarchive` are removed
 *commands* but live *tools* under `session_archive`. Separate registries, so
 their presence says nothing about the command of the same name.
 
+## A Synthetic Message Is A **User** Message — So Every Report Is Framed
+`ctx.session.synthetic()` posts a **user** message. OpenCode's own plugin API
+says so: the compaction autocontinue hook in `@opencode-ai/plugin` documents
+"the synthetic user `continue` turn". The agent therefore reads a command's
+output as something it was **asked to do**, not as something that happened.
+
+That is invisible until a report describes something outside the conversation.
+`/list_sessions` ended with "Right-click a session there to get its buttons:
+Archive or Restore, Transcript.md, …" — and a fresh session's agent took that as
+a task. It went looking for the popup window, and because **re-running the
+command posts the same note again**, every attempt fed the next one. Observed as
+an agent stuck in a loop on a command whose only job is to open a window.
+
+So both branches now go through `statusNote()`, which leads with
+`**Status — no action needed.**` and says plainly: not a request, reply to
+nothing, run nothing, do not go looking for the session window. The window's
+contents are described rather than instructed — "The user drives it with the
+mouse" instead of "Right-click a session there" — because that sentence was
+the trigger, and an unattributed imperative reads as a task no matter what
+precedes it.
+
+The failure branch needs the guard at least as much, and for a sharper reason:
+**"could not open the window, here is why" is a message an agent tries to
+*fix*** — install the missing binary, retry the launch — and the retry reports
+failure again. The reason is still reported, because a person may want it.
+
+**This is a text guard, not a mechanism.** There is no flag: a plugin cannot
+post into a session without the model seeing it, and `TextPart` does carry an
+`ignored` field but the plugin's `session.synthetic({sessionID, text})` wrapper
+does not expose it. So the wording *is* the fix, which is why
+`test/status.test.ts` asserts the guard sentences rather than the behaviour —
+nothing else would catch a rewording. It also asserts the two branches are
+actually **wired** to the builders, because a guarded helper nobody calls is not
+a fix.
+
 ## Command Output Goes to Two Channels
 Every command writes to `~/.local/share/opencode/session-log/<timestamp>.md`
 **and** posts a synthetic message. Override with `OPENCODE_SESSION_LOG_DIR`.
+
+Both channels get the same string, guard included, so they cannot drift. The
+guard reads in the log as what it is — a note the command left behind.
 
 **Corrected 2026-10-16.** This file previously claimed the desktop app "does not
 reliably render synthetic messages", and treated the file as the load-bearing
@@ -462,6 +501,7 @@ test/namespacing.test.ts  # Guards tool namespacing / core-tool collisions
 test/naming.test.ts       # Text must not name a command that no longer exists
 test/range.test.ts        # Out-of-range numbers refused, not reinterpreted
 test/sessionlog.test.ts   # The running output log appends and trims
+test/status.test.ts       # Reports framed as status — the agent-loop guard
 test/retention.test.ts    # Bounded backups
 popup/session-list-popup  # The GTK window — source of truth, symlinked into ~/.local/bin
 popup/test-popup-gui.py   # Widgets, strips, layout, delete dialog, export
