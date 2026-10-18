@@ -96,8 +96,11 @@ The repo copy is the source of truth; edit it there, not in `~/.local/bin`.
 A GTK3 script that reads and writes the same database directly. Above the list
 are three sort buttons — **Name**, **Start date** (`time_created`),
 **Last modified** (`time_updated`) — and a search box. Both date orders are
-newest-first, and both columns were already selected by the store. Right-click a
-row to open its strip:
+newest-first, and both columns were already selected by the store. **The window
+opens on Last modified**, from `DEFAULT_SORT`; Name is one click away, which is
+the right way round — "what did I work on lately" is what most sessions are
+opened to answer, and "what was it called" is a question you already know the
+answer to. Right-click a row to open its strip:
 
 | Button | Does |
 |--------|------|
@@ -141,9 +144,17 @@ because "the session I want to revisit" is archived as often as not.
 - **Esc in the search box clears it; it does not close the window.** A second
   Esc still closes, and a row's strip still takes the first one. `on_key`
   checks the box's contents before falling through to the row and window logic.
-- Neither control is remembered between launches: the window opens on `Name`
-  with an empty box. State on disk for two preferences is more machinery than
-  the two preferences are worth.
+- Neither control is remembered between launches: the window opens on
+  `DEFAULT_SORT` (last modified) with an empty box. State on disk for two
+  preferences is more machinery than the two preferences are worth.
+- **`DEFAULT_SORT` is read by the window *and* by `plain_text()`, not by
+  `inventory()`.** The first two are the popup and must agree, so they share
+  the constant and `test-popup-gui.py` checks `--copy` against the window's own
+  order. `/list_sessions --text` is `inventory()` in index.ts, which stays
+  alphabetical by a separate decision with its own test
+  (`menu.test.ts`, "sorts rows by title within each section"). **So `--text` and
+  the window deliberately disagree on order.** That is a live inconsistency, not
+  an oversight — flip `inventory()` and that test together if it is not wanted.
 
 **Transcript.md extracts images.** A pasted screenshot is ~200KB of base64 PNG
 stored inline in the message's `files` list — not in a `part` row — so a reader
@@ -268,7 +279,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 11 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 131 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
+| `popup/test-popup-gui.py` | 134 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
 | `popup/test-popup-writes.py` | 57 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |

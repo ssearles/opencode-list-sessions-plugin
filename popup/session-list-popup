@@ -155,6 +155,17 @@ SORTS = (
      "sorted by last modified, newest first"),
 )
 
+# What the window opens on. Newest-first, because "what did I work on lately"
+# is the question most sessions are opened to answer, and Name is one click away
+# for the times you are looking for a session you can name.
+#
+# Both `--copy` and the window read this rather than repeating the choice, so
+# the two cannot drift.
+#
+# `/list_sessions --text` is NOT covered by this: that is inventory() in
+# index.ts, which lists alphabetically by a separately tested decision.
+DEFAULT_SORT = "updated"
+
 
 def by_date(rows: list[dict], field: str = "time_updated") -> list[dict]:
     """
@@ -507,15 +518,20 @@ def plain_text(store: Store) -> str:
     """
     The same list as the window, for stdout and tests.
 
-    Unnumbered, and sorted by name, for the same reasons the window is: the
-    actions live on buttons, so there is nothing to type a number into, and the
-    plugin's own `/list_sessions` is deliberately unnumbered too. Every line
-    carries its full session id, which is unambiguous where a remembered
-    position would not be.
+    Unnumbered, for the same reason the window is: the actions live on buttons, so
+    there is nothing to type a number into, and the plugin's own `/list_sessions`
+    is deliberately unnumbered too. Every line carries its full session id, which
+    is unambiguous where a remembered position would not be.
+
+    Ordered by DEFAULT_SORT, which is what the window opens on. The two are the
+    same product and have said they agree for a while; sharing the constant is
+    what keeps that true.
     """
     rows = store.list()
-    working = by_name([r for r in rows if not r["archived"]])
-    archived = by_name([r for r in rows if r["archived"]])
+    default = next(o for o in SORTS if o[0] == DEFAULT_SORT)
+    order = by_name if default[2] is None else lambda r: by_date(r, default[2])
+    working = order([r for r in rows if not r["archived"]])
+    archived = order([r for r in rows if r["archived"]])
 
     def block(heading: str, items: list[dict]) -> list[str]:
         if not items:
@@ -688,7 +704,7 @@ class Window(Gtk.Window):
         # The two view controls, kept as state rather than read back off their
         # widgets. reload() runs after every write, and a sort or a search that
         # reset itself each time would be worse than not having them.
-        self.sort_mode = "name"  # "name" | "date"
+        self.sort_mode = DEFAULT_SORT  # a mode from SORTS
         self.query = ""
 
         # Size to the screen rather than a fixed guess. The window is floated

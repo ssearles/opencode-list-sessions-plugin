@@ -97,6 +97,15 @@ def main():
         check("section headings excluded from session rows",
               len(rows) < len(win.listbox.get_children()))
 
+        # Asserted before anything mutates the sort, because every later block
+        # that needs an order clicks a button first.
+        check("the window opens newest-first",
+              win.sort_mode == pop.DEFAULT_SORT == "updated"
+              and [b.get_label() for b in win.sort_buttons if b.get_active()]
+              == ["Last modified"],
+              f"{win.sort_mode} / "
+              f"{[b.get_label() for b in win.sort_buttons if b.get_active()]}")
+
         print("\nstrips start hidden")
         check("no action strip visible at start",
               all(not r.actions.get_visible() for r in rows))
@@ -215,7 +224,14 @@ def main():
         win.reload()
         rows = session_rows(win)
 
-        print("\nrows are sorted by name, not by recency")
+        print("\nclicking Name sorts by name, not by recency")
+        # This block used to assert the window's *default* was alphabetical,
+        # which is why it could skip clicking anything. The default is now
+        # newest-first, so the button is clicked here and the block keeps
+        # testing what it was written to test: that by_name is what orders the
+        # rows, and that no timestamp leaks into the key.
+        next(b for b in win.sort_buttons
+             if b.get_label() == "Name").set_active(True)
         def titles_on_screen(w):
             """(section heading, title) for each session row, in display order."""
             out = []
@@ -309,8 +325,9 @@ def main():
         leaders = {id(g[0]) if len(g) else None
                    for g in (b.get_group() for b in win.sort_buttons)}
         check("they share one radio group", len(leaders) == 1, str(leaders))
-        check("Name is the order on open",
-              win.sort_mode == "name" and sort_btn("Name").get_active())
+        check("the open order is one of the three",
+              win.sort_mode in {m for m, _l, _f, _d in pop.SORTS},
+              win.sort_mode)
 
         rows_now = store.list()
         want_by = {
@@ -537,13 +554,30 @@ def main():
                   "Archive" in btns and not btns["Archive"].get_sensitive(),
                   str(list(btns)))
 
-        # Left as the later blocks expect: no filter, name order.
+        # Left as the later blocks expect: no filter, default order.
         type_in_search("")
-        sort_btn("Name").set_active(True)
+        sort_btn(next(o[1] for o in pop.SORTS if o[0] == pop.DEFAULT_SORT)
+                ).set_active(True)
         check("the window is back to its default view",
-              win.query == "" and win.sort_mode == "name"
+              win.query == "" and win.sort_mode == pop.DEFAULT_SORT
               and len(screen_order()) == len(rows_now),
               f"{win.query!r} / {win.sort_mode}")
+
+        print("\n--copy prints the same order the window opens on")
+        # Both read DEFAULT_SORT rather than repeating the choice, so this is a
+        # check on the constant being honoured twice, not on two sorters
+        # agreeing by luck. Compared against the window's own order rather than
+        # a sort rebuilt here: both order each *section* separately, so a flat
+        # sort of every row is a third thing and disagrees with both.
+        text_out = pop.plain_text(store)
+        on_screen_now = [t for _s, t in screen_order()]
+        positions = [text_out.find(t) for t in on_screen_now]
+        check("--copy lists every row the window lists",
+              all(p != -1 for p in positions),
+              f"{sum(1 for p in positions if p == -1)} missing from --copy")
+        check("--copy is in the same order as the window",
+              positions == sorted(positions),
+              f"{[(t, p) for t, p in zip(on_screen_now, positions) if p == -1]}")
 
         print("\ncontent fits a half-width tile")
         # Use preferred widths, not allocations: this window is never mapped in
