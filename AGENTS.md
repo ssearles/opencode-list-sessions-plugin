@@ -299,7 +299,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 134 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
+| `popup/test-popup-gui.py` | 138 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
@@ -437,6 +437,24 @@ survives: the actions come first, and the line is ≤110 chars.
 
 `LIST_SESSIONS_DESCRIPTION` is a module constant rather than an inline literal so
 `status.test.ts` can assert on it — the same reasoning as the report builders.
+
+**Stale text is the predictable failure here, so the sort tooltip is checked
+against the constant.** The flip to newest-first (`5758b7c`) changed
+`DEFAULT_SORT` and left four sentences asserting the old behaviour: the sort
+tooltip ("resets to Name"), `reload()`'s docstring ("Name is the default sort,
+and stays it"), `_on_search_changed`'s ("No debounce" — written against
+`changed`, and `search-changed` debounces by design), and `DEFAULT_SORT`'s own
+comment, which still described `inventory()` as alphabetical after `895523f`
+flipped that too.
+
+`DEFAULT_SORT_LABEL` exists so the tooltip **derives** the name instead of
+repeating it, and `test-popup-gui.py` checks every tooltip against it. Four
+sentences went stale together because none of them read the constant; the ones
+that do now cannot.
+
+The dead `total_working` / `total_archived` locals went in the same pass. They
+were computed under a comment explaining a mechanism, and the mechanism was
+actually `len(shown) != len(data)`.
 
 ## Wording Is Tested Too, Not Just Behaviour
 A footer reading "copy an id into `/archive_Put`, `/archive_Pull` or `/session`"

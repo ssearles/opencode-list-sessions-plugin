@@ -579,6 +579,22 @@ def main():
               positions == sorted(positions),
               f"{[(t, p) for t, p in zip(on_screen_now, positions) if p == -1]}")
 
+        print("\nthe sort buttons describe themselves truthfully")
+        # The tooltip says which order the window reopens in, and it was written
+        # by hand as "Name" -- then went on saying so for three commits after the
+        # default became newest-first. A tooltip that contradicts the window is
+        # worse than no tooltip, so the sentence is checked against the constant
+        # rather than trusted.
+        for b in win.sort_buttons:
+            tip = b.get_tooltip_text() or ""
+            check(f"the {b.get_label()} tooltip names the real default",
+                  pop.DEFAULT_SORT_LABEL in tip and "resets to" in tip,
+                  tip.replace("\n", " ")[:70])
+        check("the default label is the mode the window opens on",
+              pop.DEFAULT_SORT == "updated"
+              and pop.DEFAULT_SORT_LABEL == "Last modified",
+              f"{pop.DEFAULT_SORT} / {pop.DEFAULT_SORT_LABEL}")
+
         print("\ncontent fits a half-width tile")
         # Use preferred widths, not allocations: this window is never mapped in
         # the test, so every allocation is 1px and measuring one proves nothing.

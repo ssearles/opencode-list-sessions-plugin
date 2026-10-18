@@ -162,9 +162,18 @@ SORTS = (
 # Both `--copy` and the window read this rather than repeating the choice, so
 # the two cannot drift.
 #
-# `/list_sessions --text` is NOT covered by this: that is inventory() in
-# index.ts, which lists alphabetically by a separately tested decision.
+# `/list_sessions --text` follows the same rule: `byRecency()` in index.ts,
+# newest-first for the same reason. The two are separate copies rather than a
+# shared constant -- TypeScript and Python cannot share one -- and are held
+# together by tests instead.
 DEFAULT_SORT = "updated"
+
+# The button label for DEFAULT_SORT, for text that has to name it. Derived, not
+# repeated: the sort tooltip says which order the window reopens in, and when
+# that sentence was written by hand it went on saying "Name" for three commits
+# after the default became newest-first.
+DEFAULT_SORT_LABEL = next(label for mode, label, _f, _d in SORTS
+                          if mode == DEFAULT_SORT)
 
 
 def by_date(rows: list[dict], field: str = "time_updated") -> list[dict]:
@@ -798,7 +807,8 @@ class Window(Gtk.Window):
             )
             btn.set_tooltip_text(
                 f"Sort {description}.\n\n"
-                "The order resets to Name each time the window is opened."
+                f"The order resets to {DEFAULT_SORT_LABEL} each time the "
+                f"window is opened."
             )
             btn.set_active(mode == self.sort_mode)
             btn.connect("toggled", self._on_sort_toggled, mode)
@@ -884,12 +894,17 @@ class Window(Gtk.Window):
         search you had just typed, and the row you acted on would be the only
         one still on screen.
 
-        Name is the default sort, and stays it: an alphabetical list is what
-        "find the session called X" scans, and it is the order the window has
-        always had. `time_updated` is deliberately not a tiebreaker within it
-        -- the store returns most-recent-first, so adding it would reproduce
-        recency ordering for every pair of same-titled sessions, which is not a
-        tie anyone asked to be broken.
+        Name is no longer the default. It was, until the flip to newest-first,
+        and this paragraph kept asserting it long afterwards. An alphabetical
+        list is what "find the session called X" scans, which is true, and is
+        also why Name stayed on as a button rather than as the default. The
+        default is DEFAULT_SORT, and it is read off `self` rather than
+        restated here so it cannot go stale again.
+
+        Within Name, `time_updated` is deliberately not a tiebreaker: the store
+        returns most-recent-first, so adding it would reproduce recency
+        ordering for every pair of same-titled sessions, which is not a tie
+        anyone asked to be broken.
         """
         for child in self.listbox.get_children():
             self.listbox.remove(child)
@@ -898,13 +913,9 @@ class Window(Gtk.Window):
         order = next(o for o in SORTS if o[0] == self.sort_mode)
         sort = by_name if order[2] is None else lambda r: by_date(r, order[2])
 
-        # Counts are taken before filtering, so the status line can say how much
-        # is hidden as well as what is shown. "3 sessions" reads as the whole
-        # list otherwise, and the honest answer to "where did it go" is in the
-        # footer already.
-        total_working = sum(1 for d in data if not d["archived"])
-        total_archived = sum(1 for d in data if d["archived"])
-
+        # Filtering happens against the whole set, before the split, so the
+        # status line can say how much is hidden as well as what is shown --
+        # `len(shown) != len(data)` below is what "3 of 16" is built from.
         shown = filter_rows(data, self.query)
         working = sort([d for d in shown if not d["archived"]])
         archived = sort([d for d in shown if d["archived"]])
@@ -1351,12 +1362,24 @@ class Window(Gtk.Window):
         self.reload()
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
-        """Re-filter on every keystroke.
+        """Re-filter on every change the box reports.
 
-        No debounce. The list is a few hundred rows at most and reload() is a
-        rebuild of widgets already in memory; a delay would only make the box
-        feel like it is not listening, which is the one thing a search box must
-        never feel like.
+        Connected to `search-changed`, not `changed`, and the difference is
+        the debounce: SearchEntry emits from a ~150ms timer, so a fast typist's
+        several keystrokes become ONE rebuild rather than one each.
+
+        This docstring used to say "No debounce", on the argument that a delay
+        makes the box feel unresponsive. That was written against `changed` and
+        never revisited when the signal changed -- so it described the opposite
+        of what the code does, and argued for something the chosen signal had
+        already decided. The list is a few hundred rows at most, and reload() is
+        a rebuild of widgets already in memory, so there is no cost worth that
+        argument anyway.
+
+        The cost of the debounce is in the TESTS, not the window: the signal
+        does not fire from `set_text()`, so a test that sets the box without
+        running the main loop measures a window with no filter on it. See
+        `settle()` in test-popup-gui.py.
         """
         self.query = entry.get_text()
         self.reload()
