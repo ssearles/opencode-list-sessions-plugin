@@ -455,6 +455,28 @@ function inventory(all: SessionRow[], limit = 60): string {
 }
 
 /**
+ * The palette line for `/list_sessions`.
+ *
+ * `/archive_Put`, `/archive_Pull` and `/save` were removed and everything they
+ * did became a button in this one window. Somebody used to typing those has
+ * nowhere to notice that unless the line they now see in the palette says so —
+ * so it names the actions rather than describing the window.
+ *
+ * The previous version led with how the window is laid out ("unarchived first,
+ * then archived, with… on each row"). That is what the window's own banner is
+ * for, it is too long for a palette entry, and it spent the line describing a
+ * window instead of advertising what can be done in it.
+ *
+ * Kept short deliberately: the palette truncates, and the part that survives is
+ * the front. That is why the actions come first, before any description of the
+ * window, and why "nothing to type" — the part that answers the question this
+ * line exists for — is last but close enough to survive.
+ */
+const LIST_SESSIONS_DESCRIPTION =
+  "Archive, Restore, Transcript.md, Export .json, Delete — right-click a row, " +
+  "nothing to type"
+
+/**
  * Frame a report as a status note rather than a request.
  *
  * `ctx.session.synthetic()` posts a **user** message. OpenCode's own plugin API
@@ -731,10 +753,7 @@ export default {
     await ctx.command.transform((editor) => {
       editor.add({
         name: "list_sessions",
-        description:
-          "Open the session popup window — unarchived first, then archived, " +
-          "with Archive, Restore, Transcript.md, Export .json and Delete on " +
-          "each row",
+        description: LIST_SESSIONS_DESCRIPTION,
         execute: async ({ sessionID, prompt }) => {
           try {
             // `/list_sessions --text` keeps the old behaviour of printing the
@@ -1049,3 +1068,6 @@ export const __parseArgs = parseArgs
 export const __statusNote = statusNote
 export const __popupOpenedNote = popupOpenedNote
 export const __popupFailedNote = popupFailedNote
+/** Exposed for tests: the palette line, which is the only place the removed
+ *  commands' replacements are advertised. */
+export const __listSessionsDescription = LIST_SESSIONS_DESCRIPTION

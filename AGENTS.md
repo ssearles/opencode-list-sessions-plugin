@@ -284,7 +284,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/naming.test.ts` | 4 | User-facing text names only registered commands |
 | `test/range.test.ts` | 6 | Out-of-range numbers refused, not reinterpreted |
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
-| `test/status.test.ts` | 11 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
+| `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 | `popup/test-popup-gui.py` | 134 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
 | `popup/test-popup-writes.py` | 57 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
@@ -402,6 +402,28 @@ d = pathlib.Path("/usr/lib/opencode-desktop/app.asar").read_bytes()
 hl = struct.unpack("<I", d[12:16])[0]
 hdr = json.loads(d[16:16+hl].decode()); base = 16 + hl
 ```
+
+## The Palette Line Is Where A Removed Command Gets Advertised
+`/archive_Put`, `/archive_Pull` and `/save` are gone, and their jobs are buttons
+in the popup window. **A command that no longer exists has no way to tell the
+person who used to type it where its job went** — so the one line they still see
+for `/list_sessions` has to carry it:
+
+```
+Archive, Restore, Transcript.md, Export .json, Delete — right-click a row, nothing to type
+```
+
+It was 161 chars of layout ("Open the session popup window — unarchived first,
+then archived, with … on each row"), which is what the window's own banner is
+for, and which described a window instead of advertising what can be done in it.
+
+Two constraints, because the palette truncates and the **front** is what
+survives: the actions come first, and the line is ≤110 chars.
+`test/status.test.ts` asserts both, plus that every action is named, that
+"nothing to type" is present, and that no layout phrase crept back in.
+
+`LIST_SESSIONS_DESCRIPTION` is a module constant rather than an inline literal so
+`status.test.ts` can assert on it — the same reasoning as the report builders.
 
 ## Wording Is Tested Too, Not Just Behaviour
 A footer reading "copy an id into `/archive_Put`, `/archive_Pull` or `/session`"

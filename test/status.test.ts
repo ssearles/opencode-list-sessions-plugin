@@ -28,6 +28,7 @@ import { dirname, join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
+  __listSessionsDescription,
   __popupFailedNote,
   __popupOpenedNote,
   __statusNote,
@@ -120,6 +121,57 @@ describe("/list_sessions reports are status, not instructions", () => {
     const note = __statusNote("the body")
     assert.ok(note.endsWith("the body"), "the body must survive framing")
     assert.ok(note.indexOf("no action needed") < note.indexOf("the body"), "the guard must come first")
+  })
+})
+
+/**
+ * The palette line is the only place the removed commands' replacements are
+ * advertised.
+ *
+ * `/archive_Put`, `/archive_Pull` and `/save` are gone, and their jobs are
+ * buttons in the popup window. A command that no longer exists has no way to
+ * tell the person who used to type it where its job went — so if this line
+ * stops naming the actions, nobody finds out and the easiest way to archive a
+ * session stays unknown to them.
+ *
+ * It used to describe the window's layout instead ("unarchived first, then
+ * archived, with… on each row"), which is what the window's own banner is for.
+ */
+describe("the /list_sessions palette line", () => {
+  it("names every action the window offers", () => {
+    for (const action of ["Archive", "Restore", "Transcript.md", "Export .json", "Delete"]) {
+      assert.ok(
+        __listSessionsDescription.includes(action),
+        `the palette line no longer mentions ${action}, and that is how the removed commands are advertised`,
+      )
+    }
+  })
+
+  it("says the actions are clicked rather than typed", () => {
+    // The point of the line. Without it, "Archive, Restore, …" reads as a list
+    // of things this command does, which is what it used to mean.
+    assert.match(__listSessionsDescription, /nothing to type/i)
+  })
+
+  it("stays short enough for a palette entry", () => {
+    // The palette truncates, and the front is what survives — so the actions
+    // have to be in front, and the line has to be over before it is cut.
+    assert.ok(
+      __listSessionsDescription.length <= 110,
+      `palette line is ${__listSessionsDescription.length} chars: ${__listSessionsDescription}`,
+    )
+    const firstAction = __listSessionsDescription.indexOf("Archive")
+    assert.ok(firstAction < 40, `the actions start too late to survive truncation: ${firstAction}`)
+  })
+
+  it("does not describe the window's layout, which is the banner's job", () => {
+    // Both were true of the old line at once, which is how it ran to 161 chars.
+    for (const layout of ["unarchived first", "on each row", "then archived"]) {
+      assert.ok(
+        !__listSessionsDescription.toLowerCase().includes(layout),
+        `the palette line describes layout ("${layout}") instead of what can be done`,
+      )
+    }
   })
 })
 
