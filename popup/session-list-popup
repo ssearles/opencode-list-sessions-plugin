@@ -27,7 +27,7 @@ The buttons on every row, archived or not:
   Copy id            the session id, for handing to the CLI.
   Transcript.md      the whole conversation as Markdown, to
                      ~/Downloads/<title>.md. For reading.
-  Export .json       OpenCode's own export format, to ~/Downloads/<title>.json,
+  Export.json       OpenCode's own export format, to ~/Downloads/<title>.json,
                      importable with `opencode session import`. The only route
                      that leaves this machine: archive and restore are direct
                      writes to this database and exist nowhere else.
@@ -2001,7 +2001,7 @@ class Window(Gtk.Window):
         t.set_xalign(0)
         h = Gtk.Label(
             label="Right-click a session to open its buttons: Stats, Archive or "
-            "Restore, Transcript.md, Export .json, Delete, and Close to back "
+            "Restore, Transcript.md, Export.json, Delete, and Close to back "
             "out without doing anything.\n\n"
             "Stats is read-only and says what one session cost in size, money and "
             "tokens -- plus its models and every file it touched. The Database "
@@ -2462,7 +2462,7 @@ class Window(Gtk.Window):
         read_btn.connect("clicked", lambda *_: self._save_transcript(d))
         buttons.insert(read_btn, -1)
 
-        export_btn = Gtk.Button(label="Export .json")
+        export_btn = Gtk.Button(label="Export.json")
         export_btn.set_tooltip_text(
             "Write OpenCode's own export format to ~/Downloads/<title>.json, "
             "which `opencode session import` reads back.\n\n"
@@ -2489,7 +2489,7 @@ class Window(Gtk.Window):
                 "Remove the session and its messages from the database, after "
                 "asking you to confirm.\n\n"
                 "A backup is taken first, but only the last three are kept, so "
-                "this is close to irreversible. Export .json first if you are "
+                "this is close to irreversible. Export.json first if you are "
                 "not sure."
             )
             delete_btn.connect("clicked", lambda *_: self._delete_session(d))

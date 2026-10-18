@@ -609,7 +609,7 @@ def main():
             Gtk.main_iteration_do(None)
 
         btns = _find_buttons(row.actions)
-        expected = ("Archive", "Copy id", "Transcript.md", "Export .json",
+        expected = ("Archive", "Copy id", "Transcript.md", "Export.json",
                     "Delete", "Close")
         check("every button exists on an unarchived row",
               all(k in btns for k in expected),
@@ -685,7 +685,7 @@ def main():
               str(list(strip_btns)))
         check("the rest stay available on the live row",
               all(strip_btns[k].get_sensitive()
-                  for k in ("Copy id", "Transcript.md", "Export .json", "Close")
+                  for k in ("Copy id", "Transcript.md", "Export.json", "Close")
                   if k in strip_btns))
         check("the strip says archiving is not allowed",
               "not allowed" in _strip_label(live_row.actions))
@@ -818,7 +818,7 @@ def main():
         finally:
             win._out_dir = real_out
 
-        print("\nExport .json goes through the opencode CLI")
+        print("\nExport.json goes through the opencode CLI")
         # Stubbed rather than run: the real `opencode session export` writes
         # megabytes from the running server, and what needs proving here is the
         # plumbing -- which command is run, where the bytes land, and what
@@ -1076,7 +1076,7 @@ def main():
         button_list = m.group(1) if m else ""
         check("it names the per-session Stats button", "Stats" in button_list,
               button_list)
-        for action in ("Archive", "Transcript.md", "Export .json", "Delete"):
+        for action in ("Archive", "Transcript.md", "Export.json", "Delete"):
             check(f"the button list still names {action}", action in button_list)
         check("and says Close does nothing", "Close" in button_list, button_list)
 

@@ -132,7 +132,7 @@ describe("/list_sessions reports are status, not instructions", () => {
     // The guard is not a substitute for the report. Dropping the detail would
     // make the note shorter and no less likely to be read as a request.
     const opened = __popupOpenedNote()
-    for (const expected of ["Stats", "Archive or Restore", "Transcript.md", "Export .json", "Delete"]) {
+    for (const expected of ["Stats", "Archive or Restore", "Transcript.md", "Export.json", "Delete"]) {
       assert.ok(opened.includes(expected), `the success report no longer mentions ${expected}`)
     }
   })
@@ -201,7 +201,7 @@ describe("/list_sessions reports are status, not instructions", () => {
  */
 describe("the /list_sessions palette line", () => {
   it("names every action the window offers", () => {
-    for (const action of ["Stats", "Archive", "Restore", "Transcript.md", "Export .json", "Delete"]) {
+    for (const action of ["Stats", "Archive", "Restore", "Transcript.md", "Export.json", "Delete"]) {
       assert.ok(
         __listSessionsDescription.includes(action),
         `the palette line no longer mentions ${action}, and that is how the removed commands are advertised`,

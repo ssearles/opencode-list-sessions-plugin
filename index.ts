@@ -520,7 +520,7 @@ const totals = storeTotals(all)
  * line exists for — is last but close enough to survive.
  */
 const LIST_SESSIONS_DESCRIPTION =
-  "Stats, Archive, Restore, Transcript.md, Export .json, Delete — right-click a " +
+  "Stats, Archive, Restore, Transcript.md, Export.json, Delete — right-click a " +
   "row, nothing to type"
 
 /**
@@ -573,7 +573,7 @@ function popupOpenedNote(): string {
         "most recently modified first, with Name and Start date one click away. " +
         "The user drives it with the mouse: right-click a row " +
         "for that session's buttons, Stats, Archive or Restore, Transcript.md, " +
-        "Export .json, Delete, and Close to back out without writing anything.",
+        "Export.json, Delete, and Close to back out without writing anything.",
       "",
       "Stats is read-only: what one session took in size, cost and tokens, its " +
         "models, and every file it touched. Database, in the window's own footer, " +

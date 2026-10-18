@@ -107,7 +107,7 @@ answer to. Right-click a row to open its strip:
 | Archive / Restore | The primary action; refused on the session you are working in |
 | Copy id | The session id, for handing to the CLI |
 | Transcript.md | Full transcript to `~/Downloads/<title>.md` |
-| Export .json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
+| Export.json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
 | Delete | Removes the session, after a dialog defaulting to Cancel |
 | Close | Nothing at all — backs out of the strip without writing |
 
@@ -231,7 +231,7 @@ Five things about it that are easy to get wrong:
   single column — six buttons stacked one per line, the last one below the fold.
   `child-alignment`, which is what actually expresses "right-align the
   children", is absent from this PyGObject binding and raises AttributeError.
-- **`Export .json` shells out to the CLI rather than building the payload.** The
+- **`Export.json` shells out to the CLI rather than building the payload.** The
   import format is the CLI's to define and has changed between releases; a
   hand-assembled payload one field out imports to an empty session, which is
   worse than no export because it looks like it worked.
@@ -424,7 +424,7 @@ person who used to type it where its job went** — so the one line they still s
 for `/list_sessions` has to carry it:
 
 ```
-Archive, Restore, Transcript.md, Export .json, Delete — right-click a row, nothing to type
+Archive, Restore, Transcript.md, Export.json, Delete — right-click a row, nothing to type
 ```
 
 It was 161 chars of layout ("Open the session popup window — unarchived first,

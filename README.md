@@ -25,7 +25,7 @@ screenshots pasted into the conversation.
 > **Not a backup.** `/export` writes JSON, which `opencode import` can read back.
 > Markdown cannot be re-imported, and it drops assistant reasoning to do it. If
 > you want a restorable archive, keep using `/export`, or the window's
-> **Export .json** button, which produces the same importable format.
+> **Export.json** button, which produces the same importable format.
 
 ## Install
 
