@@ -147,6 +147,80 @@ def by_name(rows: list[dict]) -> list[dict]:
     )
 
 
+SORTS = (
+    # (mode, button label, timestamp field or None, how the footer describes it)
+    ("name", "Name", None, "sorted by name"),
+    ("created", "Start date", "time_created", "sorted by start date, newest first"),
+    ("updated", "Last modified", "time_updated",
+     "sorted by last modified, newest first"),
+)
+
+
+def by_date(rows: list[dict], field: str = "time_updated") -> list[dict]:
+    """
+    Sort session rows by a timestamp, newest first.
+
+    `field` is `time_created` or `time_updated` -- the two dates worth ordering
+    by, and both already selected by the store. They answer different
+    questions, which is why both are offered: a session started last Tuesday
+    and finished an hour ago sits at the top of one list and near the bottom
+    of the other, and which one you want depends on whether you are after "what
+    did I begin" or "what did I last leave off".
+
+    Newest-first because the reason to reach for this is almost always "what
+    did I work on lately" -- an oldest-first list buries today's work at the
+    bottom, which is the opposite of the point.
+
+    `id` breaks the tie, for the same reason by_name() does: a list that
+    reshuffles between two refreshes is unreadable while you are reaching for a
+    row in it. Rows with no timestamp sort last rather than first, matching
+    by_name()'s handling of untitled rows -- an absent value is nothing to
+    order by, so it goes where it is visible rather than where it wins.
+    """
+    return sorted(
+        rows,
+        key=lambda d: (
+            not (d.get(field) or 0),
+            -(d.get(field) or 0),
+            d.get("id") or "",
+        ),
+    )
+
+
+def matches(d: dict, terms: list[str]) -> bool:
+    """
+    True when every term appears somewhere in this session.
+
+    All of title, id and directory are searched, not just the title. The title
+    is what people remember, but the id is what arrives in a terminal, and the
+    directory is how a session from another project gets found at all -- this
+    window lists every session on the machine, so most rows are not even in the
+    folder you are sitting in.
+
+    Terms are ANDed, not ORed. Typing two words is a narrowing, and treating
+    the second as an alternative makes the list grow as you type, which is the
+    behaviour that makes people distrust a search box.
+    """
+    hay = " ".join(
+        str(d.get(field) or "") for field in ("title", "id", "directory")
+    ).lower()
+    return all(t in hay for t in terms)
+
+
+def filter_rows(rows: list[dict], query: str) -> list[dict]:
+    """
+    Narrow `rows` to the ones a search box's text selects.
+
+    Whitespace splits the query into terms, so "job 8" means both. An empty or
+    whitespace-only query matches everything rather than nothing, which is what
+    makes clearing the box restore the full list without a special case.
+    """
+    terms = [t for t in (query or "").lower().split() if t]
+    if not terms:
+        return list(rows)
+    return [d for d in rows if matches(d, terms)]
+
+
 def stamp(ms) -> str:
     if not ms:
         return "-"
@@ -586,6 +660,16 @@ row.selected .title { color: #000000; }
   background-color: #f0f0f0;
 }
 .hintbar-label { color: #444444; font-size: 11px; }
+
+/* The row holding the sort toggle and the search box. Sits on a band of its
+   own so it reads as a control strip rather than as the head of the list, and
+   so the counts below it stay visually separate from the things that change
+   them. */
+.toolbar {
+  padding: 8px 14px;
+  border-bottom: 1px solid #d0d0d0;
+  background-color: #f7f7f7;
+}
 """
 
 
@@ -601,6 +685,11 @@ class Window(Gtk.Window):
         self.store = store
         self.set_default_size(900, 620)
         self.rows: list[dict] = []
+        # The two view controls, kept as state rather than read back off their
+        # widgets. reload() runs after every write, and a sort or a search that
+        # reset itself each time would be worse than not having them.
+        self.sort_mode = "name"  # "name" | "date"
+        self.query = ""
 
         # Size to the screen rather than a fixed guess. The window is floated
         # and centred by a Hyprland rule in ~/.config/hypr/looknfeel.lua, so
@@ -639,6 +728,10 @@ class Window(Gtk.Window):
             label="Right-click a session to open its buttons: Archive or "
             "Restore, Transcript.md, Export .json, Delete, and Close to back "
             "out without doing anything.\n\n"
+            "The three buttons pick the order -- by name, by when a session "
+            "started, or by when it was last touched -- and the box beside them "
+            "filters on title, id and folder as you type. Both apply to "
+            "unarchived and archived rows alike.\n\n"
             "Both file buttons write to ~/Downloads and say where. Delete asks "
             "first and can be replaced with Archive instead.\n\n"
             "OpenCode's own session menu caches its list and will not re-read it "
@@ -650,6 +743,55 @@ class Window(Gtk.Window):
         banner.pack_start(t, False, False, 0)
         banner.pack_start(h, False, False, 0)
         root.pack_start(banner, False, False, 0)
+
+        # ---- toolbar: sort toggle and search
+        #
+        # Above the list, not in the footer with Close. The footer is where the
+        # counts are, and a control that changes those counts belongs beside the
+        # thing it changes -- reading "3 of 16 shown" and having the reason
+        # three widgets away is the same problem as a status bar whose filter
+        # lives in a menu.
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        toolbar.get_style_context().add_class("toolbar")
+
+        self.sort_buttons: list[Gtk.RadioButton] = []
+        previous: Gtk.RadioButton | None = None
+        for mode, label, _field, description in SORTS:
+            # `new_with_label_from_widget` is the only way to make one of these
+            # in PyGObject: without a previous button each one becomes its own
+            # group, and all three would read as selected at once.
+            btn = (
+                Gtk.RadioButton.new_with_label_from_widget(previous, label)
+                if previous is not None
+                else Gtk.RadioButton.new_with_label_from_widget(None, label)
+            )
+            btn.set_tooltip_text(
+                f"Sort {description}.\n\n"
+                "The order resets to Name each time the window is opened."
+            )
+            btn.set_active(mode == self.sort_mode)
+            btn.connect("toggled", self._on_sort_toggled, mode)
+            self.sort_buttons.append(btn)
+            toolbar.pack_start(btn, False, False, 0)
+            previous = btn
+
+        # A SearchEntry rather than an Entry: it gets the magnifier and the
+        # clear-the-box affordance for free, which is the whole of the
+        # interaction otherwise.
+        self.search = Gtk.SearchEntry()
+        self.search.set_hexpand(True)
+        self.search.set_placeholder_text(
+            "Find sessions by title, id or folder…"
+        )
+        self.search.set_tooltip_text(
+            "Type to narrow the list. Words are combined, so two words must both "
+            "appear -- in the title, the id, or the folder.\n\n"
+            "Esc while this box is focused clears it."
+        )
+        self.search.connect("search-changed", self._on_search_changed)
+        toolbar.pack_start(self.search, True, True, 0)
+
+        root.pack_start(toolbar, False, False, 0)
 
         # ---- scrolling list
         scroller = Gtk.ScrolledWindow()
@@ -702,27 +844,39 @@ class Window(Gtk.Window):
 
     def reload(self) -> None:
         """
-        Rebuild the list, grouped by state and sorted by name within each group.
+        Rebuild the list: grouped by state, filtered by the search box, sorted
+        by whichever mode the sort button is in.
 
-        Sorting is by title, case-insensitively, with untitled sessions last
-        rather than first: an empty string sorts before every letter, which
-        would put the rows with nothing to identify them by at the top of the
-        list.
+        The filter and the sort are read off `self` rather than passed in, so
+        they survive every reload -- which happens after each archive, restore
+        and delete. Passing them as arguments would mean a write threw away a
+        search you had just typed, and the row you acted on would be the only
+        one still on screen.
 
-        The sort is on the title only. `time_updated` is deliberately not a
-        tiebreaker: the store returns sessions most-recent-first, so adding it
-        as a secondary key would reproduce recency ordering for every pair of
-        same-titled sessions, which is not a tie anyone asked to be broken.
-        Titles are not unique, so `id` is the final tiebreaker to keep the order
-        stable across refreshes -- a list that reshuffles on every write is
-        unreadable while you are trying to click one of its rows.
+        Name is the default sort, and stays it: an alphabetical list is what
+        "find the session called X" scans, and it is the order the window has
+        always had. `time_updated` is deliberately not a tiebreaker within it
+        -- the store returns most-recent-first, so adding it would reproduce
+        recency ordering for every pair of same-titled sessions, which is not a
+        tie anyone asked to be broken.
         """
         for child in self.listbox.get_children():
             self.listbox.remove(child)
 
         data = self.store.list()
-        working = by_name([d for d in data if not d["archived"]])
-        archived = by_name([d for d in data if d["archived"]])
+        order = next(o for o in SORTS if o[0] == self.sort_mode)
+        sort = by_name if order[2] is None else lambda r: by_date(r, order[2])
+
+        # Counts are taken before filtering, so the status line can say how much
+        # is hidden as well as what is shown. "3 sessions" reads as the whole
+        # list otherwise, and the honest answer to "where did it go" is in the
+        # footer already.
+        total_working = sum(1 for d in data if not d["archived"])
+        total_archived = sum(1 for d in data if d["archived"])
+
+        shown = filter_rows(data, self.query)
+        working = sort([d for d in shown if not d["archived"]])
+        archived = sort([d for d in shown if d["archived"]])
         self.rows = []
 
         if not data:
@@ -730,6 +884,40 @@ class Window(Gtk.Window):
             lbl.set_margin_top(24)
             self.listbox.add(lbl)
             self.status.set_text("Nothing in the database.")
+            self.show_all()
+            return
+
+        if not shown:
+            # Its own message, not an empty list. A blank area under a search
+            # box reads as a broken window; saying what was searched for tells
+            # you whether the term was wrong or the sessions are not here.
+            #
+            # Wrapped in an explicit ListBoxRow and marked as a section, because
+            # a bare widget added to a ListBox is wrapped in a row of its own
+            # -- and an unmarked row is a session as far as everything
+            # downstream is concerned. It would be counted in the totals, and
+            # right-clicking it would open a strip with no session behind it.
+            # See _section().
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.set_margin_top(24)
+            none = Gtk.Label(label=f"No sessions match “{self.query.strip()}”.")
+            none.get_style_context().add_class("section")
+            none.set_xalign(0)
+            box.add(none)
+            clear = Gtk.Label(label=f"Clear the box to see all {len(data)}.")
+            clear.get_style_context().add_class("meta")
+            clear.set_xalign(0)
+            box.add(clear)
+            row = Gtk.ListBoxRow()
+            row.is_section = True
+            row.session_id = None
+            row.set_selectable(False)
+            row.add(box)
+            self.listbox.add(row)
+            self.status.set_text(
+                f"0 of {len(data)} shown  ·  filter: “{self.query.strip()}”  ·  "
+                f"the filter covers title, id and folder"
+            )
             self.show_all()
             return
 
@@ -747,10 +935,13 @@ class Window(Gtk.Window):
                 self.listbox.add(self._row(d, archived=True))
 
         live = sum(1 for d in working if d.get("is_live"))
-        hint = (
-            f"{len(working)} working · {len(archived)} archived  ·  "
-            "right-click a row for its buttons, Close to back out"
-        )
+        parts = [f"{len(working)} working", f"{len(archived)} archived"]
+        if len(shown) != len(data):
+            parts.insert(0, f"{len(shown)} of {len(data)} shown")
+            parts.append(f"filter: “{self.query.strip()}”")
+        parts.append(order[3])
+        parts.append("right-click a row for its buttons, Close to back out")
+        hint = "  ·  ".join(parts)
         if live:
             hint += "  ·  the THIS SESSION row cannot be archived or deleted"
         self.status.set_text(hint)
@@ -1112,6 +1303,33 @@ class Window(Gtk.Window):
             detail = res["errors"][0] if res["errors"] else "no rows changed"
             self._toast(f"{verb} did nothing: {detail}", error=True)
 
+    def _on_sort_toggled(self, button: Gtk.RadioButton, mode: str) -> None:
+        """Rebuild in whichever order was just picked.
+
+        Guarded on `get_active()` because toggling one radio button in a group
+        toggles the others off, and "toggled" fires for all of them. Reacting
+        to the deactivations would reload three times per click, and the last
+        reload would win -- so a click on "Start date" could leave the list
+        ordered by whatever was switched away from.
+        """
+        if not button.get_active():
+            return
+        if mode == self.sort_mode:
+            return
+        self.sort_mode = mode
+        self.reload()
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
+        """Re-filter on every keystroke.
+
+        No debounce. The list is a few hundred rows at most and reload() is a
+        rebuild of widgets already in memory; a delay would only make the box
+        feel like it is not listening, which is the one thing a search box must
+        never feel like.
+        """
+        self.query = entry.get_text()
+        self.reload()
+
     def _on_focus_in(self, *_args) -> bool:
         """
         Deliberately does nothing.
@@ -1337,6 +1555,14 @@ class Window(Gtk.Window):
             self.reload()
             return True
         if event.keyval == Gdk.KEY_Escape:
+            # In the search box, Escape clears it rather than closing the
+            # window. SearchEntry swallows Escape itself when it is focused, so
+            # this only fires for the list -- but the ordering matters: a
+            # second Escape on a filtered list would otherwise take out the
+            # window and lose the filter along with it.
+            if self.search.get_text():
+                self.search.set_text("")
+                return True
             row = self.listbox.get_selected_row()
             if row is not None:
                 # First Escape closes the action strip, second closes the window.

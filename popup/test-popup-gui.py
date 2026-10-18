@@ -15,13 +15,14 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 REAL = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
@@ -288,6 +289,261 @@ def main():
                   {"title": "Same", "id": "z"},
                   {"title": "Same", "id": "a"},
               ])] == ["a", "z"])
+
+        print("\nthree sort orders, one of them active")
+        def sort_btn(label):
+            return next((b for b in win.sort_buttons if b.get_label() == label), None)
+
+        check("three sort buttons exist", len(win.sort_buttons) == 3,
+              str([b.get_label() for b in win.sort_buttons]))
+        check("they are labelled Name, Start date and Last modified",
+              [b.get_label() for b in win.sort_buttons]
+              == ["Name", "Start date", "Last modified"],
+              str([b.get_label() for b in win.sort_buttons]))
+        # Without a shared group each button is its own group and all three
+        # read as selected at once, which is the PyGObject trap the radio
+        # buttons were built to avoid.
+        #
+        # get_group() comes back as a list in this binding, not a RadioButton,
+        # so the group is identified by its leader rather than compared.
+        leaders = {id(g[0]) if len(g) else None
+                   for g in (b.get_group() for b in win.sort_buttons)}
+        check("they share one radio group", len(leaders) == 1, str(leaders))
+        check("Name is the order on open",
+              win.sort_mode == "name" and sort_btn("Name").get_active())
+
+        rows_now = store.list()
+        want_by = {
+            "name": pop.by_name,
+            "created": lambda r: pop.by_date(r, "time_created"),
+            "updated": lambda r: pop.by_date(r, "time_updated"),
+        }
+
+        def screen_order():
+            """Screen order as (section-first-word, title), archive state intact."""
+            return [((s or "").split(" ")[0], t) for s, t in titles_on_screen(win)]
+
+        for mode, label, _field, _desc in pop.SORTS:
+            sort_btn(label).set_active(True)
+            expected = []
+            for word, subset in (
+                ("UNARCHIVED", [d for d in rows_now if not d["archived"]]),
+                ("ARCHIVED", [d for d in rows_now if d["archived"]]),
+            ):
+                if not subset:
+                    continue
+                expected += [(word, d["title"] or "(untitled)")
+                             for d in want_by[mode](subset)]
+            got = screen_order()
+            check(f"screen is ordered by {label}", got == expected,
+                  f"got {got} want {expected}")
+            check(f"{label} leaves exactly one button active",
+                  sum(1 for b in win.sort_buttons if b.get_active()) == 1)
+            check(f"the footer names the {label} order",
+                  pop.SORTS[[o[0] for o in pop.SORTS].index(mode)][3]
+                  in (win.status.get_text() or ""),
+                  win.status.get_text())
+
+        # The two date orders must genuinely differ from each other and from
+        # name order, or the assertions above pass on a list that ignores the
+        # field it was handed.
+        name_order = screen_order()
+        sort_btn("Start date").set_active(True)
+        start_order = screen_order()
+        sort_btn("Last modified").set_active(True)
+        mod_order = screen_order()
+        check("start-date and last-modified orders differ from each other",
+              start_order != mod_order, "both produced the same order")
+        check("name order is not accidentally a date order",
+              len({str(name_order), str(start_order), str(mod_order)}) >= 2,
+              str(name_order))
+
+        sort_btn("Name").set_active(True)
+        check("sorting back to Name works", win.sort_mode == "name")
+
+        print("\nthe search box filters, and keeps every keystroke")
+
+        def settle():
+            """Run the main loop until the debounced filter has been applied.
+
+            Gtk.SearchEntry emits search-changed from a ~150ms timer rather
+            than from the keystroke, so a test that only calls set_text() never
+            sees the filter run -- and then "passes" every check below while
+            really only measuring a window with no filter on it. That is not a
+            hypothetical: it is exactly what the first run of this block did.
+            """
+            want = win.search.get_text()
+            ctx = GLib.MainContext.default()
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                while ctx.pending():
+                    ctx.iteration(False)
+                if win.query == want:
+                    return True
+                time.sleep(0.005)
+            return False
+
+        def type_in_search(text):
+            win.search.set_text(text)
+            return settle()
+
+        def m_term(path):
+            """The words a folder name contributes to a search, lowercased.
+
+            Spaced folder names become two search terms, which is exactly what
+            filter_rows() turns them into -- so the expectation has to be built
+            the same way or it compares two different rules.
+            """
+            return [t for t in path.rsplit("/", 1)[-1].lower().split() if t]
+
+        # Typed one character at a time on purpose. reload() rebuilds the list
+        # on every change, and the failure this guards is focus being taken by
+        # the rebuilt list -- after which the second character goes nowhere and
+        # the box silently holds a prefix of what was typed.
+        for ch in "popup":
+            win.search.set_text(win.search.get_text() + ch)
+        check("every keystroke is still in the box",
+              win.search.get_text() == "popup", win.search.get_text())
+        check("the debounced filter ran", settle())
+        check("the window's own filter state matches the box",
+              win.query == "popup", repr(win.query))
+
+        for q in ("popup", "job", "NOPE-NO-SUCH-ANYWHERE"):
+            check(f"filter {q!r} applied", type_in_search(q))
+            shown = sorted(t for _s, t in screen_order())
+            expect = sorted(d["title"] or "(untitled)"
+                            for d in pop.filter_rows(rows_now, q))
+            check(f"filter {q!r} shows exactly the matching rows",
+                  shown == expect, f"got {shown} want {expect}")
+
+        type_in_search("popup")
+        check("a one-word filter narrows the list",
+              len(screen_order()) < len(rows_now),
+              f"{len(screen_order())} of {len(rows_now)}")
+
+        print("\nthe search covers id and folder, not just the title")
+        owner = next(d for d in rows_now if d["title"])
+        type_in_search(owner["id"][:12])
+        check("an id fragment finds its own session",
+              [t for _s, t in screen_order()] == [owner["title"]],
+              str(screen_order()))
+
+        folder = rows_now[0]["directory"]
+        type_in_search(folder.rsplit("/", 1)[-1])
+        check("a folder name finds sessions from it",
+              len(screen_order()) >= 1, str(screen_order()))
+        check("and finds every session in that folder",
+              len(screen_order())
+              == sum(1 for d in rows_now
+                     if m_term(folder)
+                     and all(t in (d["title"] + d["id"] + d["directory"]).lower()
+                             for t in m_term(folder))),
+              str(screen_order()))
+
+        print("\nwords are combined, not alternated")
+        type_in_search("popup feedback")
+        check("both words present matches one session",
+              len(screen_order()) == 1, str(screen_order()))
+        type_in_search("popup zzzz-no-such-word")
+        check("one matching and one missing word matches nothing",
+              screen_order() == [], str(screen_order()))
+
+        print("\nno matches says so, rather than showing a blank list")
+        type_in_search("zzz-no-such-word")
+        texts = []
+        for child in win.listbox.get_children():
+            if isinstance(child, Gtk.ListBoxRow):
+                found = []
+                labels_in(child, found)
+                texts += found
+        check("it names the term that found nothing",
+              any("zzz-no-such-word" in t for t in texts), str(texts))
+        check("and says how many are hidden",
+              any(str(len(rows_now)) in t for t in texts), str(texts))
+        # A bare widget added to a ListBox is wrapped in a row of its own, and
+        # an unmarked row is a session to everything downstream: it lands in the
+        # totals, and right-clicking it opens a strip for a session that does
+        # not exist.
+        check("the no-match message is not a session row",
+              len(session_rows(win)) == 0, f"{len(session_rows(win))} rows")
+        check("the footer counts what is shown",
+              f"0 of {len(rows_now)}" in (win.status.get_text() or ""),
+              win.status.get_text())
+
+        print("\nEsc in the search box clears it, not the window")
+        type_in_search("popup")
+        ev = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
+        ev.keyval = Gdk.KEY_Escape
+        win.emit("key-press-event", ev)
+        check("the box is empty", win.search.get_text() == "",
+              win.search.get_text())
+        check("the window is still open", win.get_visible())
+        settle()
+        check("the full list is back", len(screen_order()) == len(rows_now),
+              f"{len(screen_order())} of {len(rows_now)}")
+
+        print("\nthe filter and the order survive a write")
+        # "popup" rather than "job" because the Job 8 sessions are archived,
+        # and the point here is a write, so it needs a row that can be written.
+        type_in_search("popup")
+        sort_btn("Last modified").set_active(True)
+        visible = [r for r in session_rows(win)
+                   if "ARCHIVED" not in _chips(r)
+                   and "THIS SESSION" not in _chips(r)]
+        target = visible[0] if visible else None
+        check("the filter left an archivable row to act on", target is not None,
+              str([c for r in session_rows(win) for c in _chips(r)
+                   if c in ("ARCHIVED", "THIS SESSION")]))
+        if target is not None:
+            click(target, button=1)
+            strip = _find_buttons(target.actions)
+            check("that row could be archived",
+                  "Archive" in strip and strip["Archive"].get_sensitive(),
+                  str(list(strip)))
+            if "Archive" in strip and strip["Archive"].get_sensitive():
+                click(strip["Archive"])
+                check("the filter is still applied after archiving",
+                      win.search.get_text() == "popup", win.search.get_text())
+                check("the order is still last-modified after archiving",
+                      win.sort_mode == "updated", win.sort_mode)
+                check("the search box still holds what was typed",
+                      win.search.get_text() == win.query, repr(win.query))
+
+        print("\nfiltering does not unprotect the live session")
+        type_in_search("")
+        sort_btn("Name").set_active(True)
+        victim = session_rows(win)[0]
+        db_g = sqlite3.connect(db)
+        try:
+            db_g.execute(f"UPDATE {store.table} SET time_suspended = NULL")
+            db_g.execute(
+                f"UPDATE {store.table} SET time_suspended = ? WHERE id = ?",
+                (int(datetime.datetime.now().timestamp() * 1000),
+                 victim.session_id),
+            )
+            db_g.commit()
+        finally:
+            db_g.close()
+        type_in_search(victim.session_id[:10])
+        live_rows = [r for r in session_rows(win)
+                     if r.session_id == victim.session_id]
+        check("the live row survived the filter", bool(live_rows),
+              "filtering hid the session it marked")
+        if live_rows:
+            lr = live_rows[0]
+            click(lr, button=1)
+            btns = _find_buttons(lr.actions)
+            check("Archive is still disabled on the live row while filtering",
+                  "Archive" in btns and not btns["Archive"].get_sensitive(),
+                  str(list(btns)))
+
+        # Left as the later blocks expect: no filter, name order.
+        type_in_search("")
+        sort_btn("Name").set_active(True)
+        check("the window is back to its default view",
+              win.query == "" and win.sort_mode == "name"
+              and len(screen_order()) == len(rows_now),
+              f"{win.query!r} / {win.sort_mode}")
 
         print("\ncontent fits a half-width tile")
         # Use preferred widths, not allocations: this window is never mapped in

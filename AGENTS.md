@@ -93,7 +93,10 @@ between two private repos costs more than 25 duplicated lines.
 `popup/session-list-popup` in this repo, installed to
 `~/.local/bin/session-list-popup` as a **symlink** (`npm run install:popup`).
 The repo copy is the source of truth; edit it there, not in `~/.local/bin`.
-A GTK3 script that reads and writes the same database directly. Right-click a
+A GTK3 script that reads and writes the same database directly. Above the list
+are three sort buttons — **Name**, **Start date** (`time_created`),
+**Last modified** (`time_updated`) — and a search box. Both date orders are
+newest-first, and both columns were already selected by the store. Right-click a
 row to open its strip:
 
 | Button | Does |
@@ -104,6 +107,43 @@ row to open its strip:
 | Export .json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
 | Delete | Removes the session, after a dialog defaulting to Cancel |
 | Close | Nothing at all — backs out of the strip without writing |
+
+**Two view controls sit above the list: three sort buttons and a search box.**
+`Name` / `Start date` / `Last modified` are radio buttons in one group, and the
+box filters as you type. Both apply to unarchived and archived rows alike,
+because "the session I want to revisit" is archived as often as not.
+
+- **The search box is a `Gtk.SearchEntry`, and its signal is `search-changed`,
+  not `changed`.** SearchEntry debounces on a ~150ms timer, which is the point:
+  rapid typing coalesces into one rebuild instead of one per keystroke. The
+  cost is that `search-changed` does **not** fire from `set_text()` — so any
+  test that sets the box without running the main loop sees a window with no
+  filter on it, and every check after it passes for the wrong reason. That is
+  not hypothetical; it is what the first run of this block did. `settle()` in
+  `test-popup-gui.py` pumps the main loop until `win.query` catches up, and
+  every filter check goes through it.
+- **The filter and the sort are read off `self` in `reload()`, not passed in.**
+  `reload()` runs after every archive, restore and delete, so passing them as
+  arguments would mean a write threw away the search you had just typed — and
+  left the row you acted on as the only one on screen.
+- **Words are ANDed, not ORed.** Typing a second word narrows the list.
+  Alternating makes the list *grow* as you type, which is what makes people
+  distrust a search box.
+- **The search covers title, id and directory.** The window lists every session
+  on the machine, so most rows are not in the folder you are sitting in, and
+  the id is what arrives in a terminal.
+- **A no-match message is marked `is_section`.** A bare widget added to a
+  `Gtk.ListBox` is wrapped in a `ListBoxRow` of its own, and an unmarked row is
+  a *session* to everything downstream — it lands in the totals, and
+  right-clicking it opens a strip for a session that does not exist. Same trap
+  `_section()` documents; the empty state is wrapped explicitly for the same
+  reason.
+- **Esc in the search box clears it; it does not close the window.** A second
+  Esc still closes, and a row's strip still takes the first one. `on_key`
+  checks the box's contents before falling through to the row and window logic.
+- Neither control is remembered between launches: the window opens on `Name`
+  with an empty box. State on disk for two preferences is more machinery than
+  the two preferences are worth.
 
 **Transcript.md extracts images.** A pasted screenshot is ~200KB of base64 PNG
 stored inline in the message's `files` list — not in a `part` row — so a reader
@@ -228,7 +268,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 11 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 84 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
+| `popup/test-popup-gui.py` | 131 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
 | `popup/test-popup-writes.py` | 57 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
