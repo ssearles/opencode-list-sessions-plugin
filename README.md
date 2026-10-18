@@ -70,6 +70,13 @@ Sections are foldable and folded by default when long, so a report is not a
 scrollbar of file paths. **Copy** puts the whole report — folded sections
 included — on the clipboard.
 
+### Text size
+
+**A-**, **A+** and **Reset size** in the footer, also `Ctrl+minus`,
+`Ctrl+plus` and `Ctrl+0`. Same controls as the `/popup` info window, and the
+size is remembered at `~/.config/session-list-popup/font-size` so the next
+window starts there. Both report windows honour it.
+
 `Database` also carries the machine, because "why is this slow on this laptop"
 is a question the per-session figures cannot answer:
 

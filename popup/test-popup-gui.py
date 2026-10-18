@@ -1073,10 +1073,14 @@ def main():
         stripped = " ".join(banner_text.split())
         # A lookahead, not a bare `.` -- "Transcript.md" has a period in the middle of
         # it, so the first version of this truncated at "Transcript."
-        m = re.search(r"(?:open|for) its buttons:(.*?)\.(?=\s|$)", stripped)
-        check("the button list is found in the banner", m is not None,
+        _match = re.search(r"(?:open|for) its buttons:(.*?)\.(?=\s|$)", stripped)
+        check("the button list is found in the banner", _match is not None,
               stripped[:140])
-        button_list = m.group(1) if m else ""
+        # Named `_match` rather than `m`: an earlier version of this reused `m`,
+        # which happened to work only because it had just bound a match --
+        # and the popup module is `pop` here, so `m` is not a name that means
+        # anything later in the file.
+        button_list = _match.group(1) if _match else ""
         check("it names the per-session Stats button", "Stats" in button_list,
               button_list)
         for action in ("Archive", "Transcript.md", "Export.json", "Delete"):
@@ -1130,6 +1134,134 @@ def main():
         check("and is not so long that it needs the window to grow",
               len(stripped) < 600, f"{len(stripped)} chars")
 
+        print("\ntext size is adjustable, and the choice is kept")
+        _prefs = Path("~/.config/session-list-popup/font-size").expanduser()
+        _saved_pref = _prefs.read_text() if _prefs.exists() else None
+        try:
+            check("the window starts at the saved size, or the default",
+                  win.font_size == pop.load_font_size(),
+                  f"window {win.font_size}, saved {pop.load_font_size()}")
+            check("A-, A+ and a reset control are all present",
+                  all(any(b.get_label() == want for b in _buttons(win))
+                      for want in ("A-", "A+", "Reset size")),
+                  str(sorted(b.get_label() for b in _buttons(win))))
+
+            # Identity at the default, so adding the scale changes nothing for
+            # anyone who never touches the buttons.
+            _same = pop.scaled_css(pop.CSS, pop.FONT_DEFAULT)
+            check("the default size renders exactly the shipped CSS",
+                  _same == pop.CSS,
+                  "scaling at FONT_DEFAULT must be the identity")
+
+            _big = pop.scaled_css(pop.CSS, pop.FONT_DEFAULT + 6)
+            _small = pop.scaled_css(pop.CSS, pop.FONT_DEFAULT - 4)
+            _px = lambda css: [int(x) for x in
+                               re.findall(rb"font-size:\s*(\d+)px", css)]
+            check("a larger size makes every font larger",
+                  all(b > a for a, b in zip(_px(pop.CSS), _px(_big))),
+                  f"{_px(pop.CSS)[:4]} -> {_px(_big)[:4]}")
+            check("a smaller size makes every font smaller",
+                  all(b < a for a, b in zip(_px(pop.CSS), _px(_small))))
+            check("no font collapses to nothing at the minimum",
+                  all(px >= 1 for px in _px(pop.scaled_css(pop.CSS, pop.FONT_MIN))),
+                  str(_px(pop.scaled_css(pop.CSS, pop.FONT_MIN))))
+
+            # Padding and border-radius are numbers in the same stylesheet and
+            # are NOT text size. A greedy match rewrites them and the layout
+            # shifts under the user's hands.
+            _nonfont = re.findall(rb"(padding:\s*[^;]+|border-radius:\s*[^;]+)",
+                                  pop.CSS)
+            check("non-font sizes are left alone",
+                  re.findall(rb"(padding:\s*[^;]+|border-radius:\s*[^;]+)",
+                             _big) == _nonfont,
+                  "padding/border-radius must not scale with the text")
+
+            win.font_size = pop.FONT_DEFAULT
+            win.set_font_size(pop.FONT_DEFAULT + 4)
+            check("set_font_size changes the size", win.font_size == pop.FONT_DEFAULT + 4)
+            check("and it is written where the next window will find it",
+                  _prefs.exists() and _prefs.read_text().strip() == str(win.font_size),
+                  _prefs.read_text().strip() if _prefs.exists() else "not written")
+
+            # The trap: add_provider_for_screen stacks providers, so adding one
+            # per press leaves the old ones behind and Reset cannot undo it.
+            _provider = win._css
+            for _ in range(4):
+                win.set_font_size(win.font_size + pop.FONT_STEP)
+            check("pressing A+ repeatedly reloads one provider, not four",
+                  win._css is _provider,
+                  "a new provider per press would stack and Reset could not undo it")
+            _up = win.font_size
+            win.set_font_size(pop.FONT_DEFAULT)
+            check("reset actually goes back down, rather than staying high",
+                  win.font_size == pop.FONT_DEFAULT and win.font_size < _up,
+                  f"{_up} -> {win.font_size}")
+            check("and the provider is still the same one after resetting",
+                  win._css is _provider)
+
+            # Clamped, so holding the key down cannot produce a 0px window.
+            win.set_font_size(pop.FONT_MAX + 500)
+            check("the size is clamped at the maximum", win.font_size == pop.FONT_MAX,
+                  str(win.font_size))
+            win.set_font_size(pop.FONT_MIN - 500)
+            check("and at the minimum", win.font_size == pop.FONT_MIN, str(win.font_size))
+
+            # Text size must not become a window-size control. Two separate
+            # mechanisms got this wrong: `width_chars` is a character count, so
+            # a fixed one grows the banner in pixels as the font grows; and the
+            # wrapped paragraphs get tall enough to push the window off the
+            # screen. Both are invisible until you actually try a big size.
+            _screen2 = Gdk.Screen.get_default()
+            _sw2, _sh2 = _screen2.get_width(), _screen2.get_height()
+            for _size in (pop.FONT_MIN, pop.FONT_DEFAULT, 15, 17, 25, pop.FONT_MAX):
+                win.set_font_size(_size)
+                while Gtk.events_pending():
+                    Gtk.main_iteration_do(False)
+                _w, _h = win.get_size()
+                check(f"the window still fits the screen at {_size}px",
+                      _w <= _sw2 and _h <= _sh2, f"{_w}x{_h} on {_sw2}x{_sh2}")
+
+            # The banner's width must shrink as the font grows, or a fixed
+            # char count is a pixel width that moves.
+            check("the banner wrap width shrinks as the font grows",
+                  pop.banner_cols(30) < pop.banner_cols(pop.FONT_DEFAULT) < pop.banner_cols(9),
+                  f"9px={pop.banner_cols(9)} 11px={pop.banner_cols(pop.FONT_DEFAULT)} "
+                  f"30px={pop.banner_cols(30)}")
+            check("and never drops below a usable line length",
+                  pop.banner_cols(pop.FONT_MAX) >= 40, str(pop.banner_cols(pop.FONT_MAX)))
+            # Checked on the live window as well as the function: set_font_size
+            # has to re-derive the wrap, and only a fresh window's size catches
+            # the construction path. Pressing A+ in an open window is the one
+            # a person actually does, and it is the one that was missed.
+            win.set_font_size(pop.FONT_MAX)
+            check("changing the size re-derives the banner wrap on the open window",
+                  win.banner_label.get_width_chars() == pop.banner_cols(pop.FONT_MAX),
+                  f"label {win.banner_label.get_width_chars()} vs "
+                  f"expected {pop.banner_cols(pop.FONT_MAX)}")
+
+            # A *fresh* window at a saved size, which is the case that went to
+            # 3778px: the CSS and the wrap are both applied at construction.
+            _prefs.parent.mkdir(parents=True, exist_ok=True)
+            _prefs.write_text("25\n")
+            _fresh = pop.Window(pop.Store(db))
+            _fresh.show_all()
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            _fw, _fh = _fresh.get_size()
+            check("a fresh window at a large saved size still fits",
+                  _fw <= _sw2 and _fh <= _sh2, f"{_fw}x{_fh} on {_sw2}x{_sh2}")
+            check("and it really did start at that size",
+                  _fresh.font_size == 25, str(_fresh.font_size))
+            _fresh.destroy()
+
+            win.set_font_size(pop.FONT_DEFAULT)
+        finally:
+            win.set_font_size(pop.FONT_DEFAULT)
+            if _saved_pref is None:
+                _prefs.unlink(missing_ok=True)
+            else:
+                _prefs.write_text(_saved_pref)
+
         print("\nthe real database was not modified by this run")
         # Compare against the state captured at the start, not against "no
         # archived sessions" — the user's own real database legitimately holds
@@ -1153,6 +1285,26 @@ def _find_buttons(box):
             out[child.get_label()] = child
         elif isinstance(child, Gtk.Container):
             out.update(_find_buttons(child))
+    return out
+
+
+def _buttons(widget):
+    """Every button under a widget, flattened. Empty when there are none."""
+    out = []
+    if isinstance(widget, Gtk.Button):
+        out.append(widget)
+    if isinstance(widget, Gtk.Container):
+        for child in widget.get_children():
+            out.extend(_buttons(child))
+    return out
+
+
+def _all_boxes(widget):
+    """Every container under a widget, so a footer can be searched by shape."""
+    out = [widget]
+    if isinstance(widget, Gtk.Container):
+        for child in widget.get_children():
+            out.extend(_all_boxes(child))
     return out
 
 

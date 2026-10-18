@@ -80,6 +80,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -841,6 +842,46 @@ def plain_text(store: Store) -> str:
 #
 # The CSS is a bytes literal, so it must stay pure ASCII. A non-ASCII character
 # in a comment here is a SyntaxError, not a rendering glitch.
+# Text size, and where the chosen one is kept between windows.
+#
+# Mirrors opencode-popup-window's info-window: same names, same bounds, same
+# Ctrl+plus / Ctrl+minus / Ctrl+0. The two repos deliberately share no code --
+# `windowCommand()` is duplicated for the same reason -- so this is a copy that
+# has to be kept in step, not a shared package.
+#
+# FONT_DEFAULT is the size the CSS below is written at, so scale = size /
+# FONT_DEFAULT leaves the shipped appearance exactly as it was.
+FONT_DEFAULT = 11
+FONT_MIN = 7
+FONT_MAX = 40
+FONT_STEP = 2
+FONT_PREFS = Path.home() / ".config" / "session-list-popup" / "font-size"
+
+
+def load_font_size() -> int:
+    """The saved text size, or the default if it is absent or nonsense."""
+    try:
+        value = int(FONT_PREFS.read_text().strip())
+    except (OSError, ValueError):
+        return FONT_DEFAULT
+    return max(FONT_MIN, min(FONT_MAX, value))
+
+
+def save_font_size(size: int) -> None:
+    """Remember the size for the next window. Never fatal."""
+    try:
+        FONT_PREFS.parent.mkdir(parents=True, exist_ok=True)
+        FONT_PREFS.write_text(f"{size}\n")
+    except OSError:
+        pass
+
+
+# A bare number inside a font-size declaration. Deliberately not a greedy
+# capture: CSS in this file also carries padding, border-radius and
+# border-bottom values, and rewriting those would change the layout as a side
+# effect of pressing A+.
+_SIZE_RE = re.compile(rb"(font-size:\s*)(\d+)(px)")
+
 CSS = b"""
 window { background-color: #ffffff; color: #000000; }
 
@@ -983,8 +1024,12 @@ class StatsWindow(Gtk.Window):
             sw, sh = screen.get_width(), screen.get_height()
             self.set_default_size(min(880, int(sw * 0.7)), min(760, int(sh * 0.84)))
 
+        # Same size the main window is using, so a report opened after pressing A+
+        # does not come back at the old one. The report is a table of numbers
+        # read at a glance -- exactly the content that suffers most from being
+        # too small -- and it is the second window anyone opens.
         css = Gtk.CssProvider()
-        css.load_from_data(CSS)
+        css.load_from_data(scaled_css(CSS, load_font_size()))
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -1115,11 +1160,19 @@ _REPORT_PROVIDER = None
 
 
 def _report_provider() -> Gtk.CssProvider:
-    """One provider, built once: the report CSS is small and constant."""
+    """
+    One provider, built once: the report CSS is small and constant.
+
+    Built from the *saved* size rather than the main window's live one, because
+    this is cached at module level and has no window to ask. That is only a
+    limitation for a report that is already open when A+ is pressed -- every
+    report opened after a change picks it up, since the report is a separate
+    window built when you click Database or Stats.
+    """
     global _REPORT_PROVIDER
     if _REPORT_PROVIDER is None:
         _REPORT_PROVIDER = Gtk.CssProvider()
-        _REPORT_PROVIDER.load_from_data(REPORT_CSS)
+        _REPORT_PROVIDER.load_from_data(scaled_css(REPORT_CSS, load_font_size()))
     return _REPORT_PROVIDER
 
 
@@ -1129,6 +1182,67 @@ expander.stat-section > box > label { font-weight: 700; font-size: 11px; }
 expander.stat-group > box > label { font-size: 10px; color: #444444; }
 expander.stat-group textview { font-size: 10px; }
 """
+
+
+# The banner's width, in PIXELS, and how many characters that is.
+#
+# This is what sizes the window. An unwrapped Gtk.Label asks for its longest
+# line, and any child asking for more than `set_default_size` wins -- which is
+# how a five-paragraph banner opened this window at 2092px on a 1366px screen.
+#
+# It has to be **pixels**, not a fixed character count. `width_chars` counts
+# characters, so a constant 150 chars is ~1078px at 11px and ~3900px at 40px:
+# adding the text-size buttons quietly turned the banner back into a width
+# control and a window opened at a large saved size came out 3778px wide.
+# Deriving the count from the font keeps the physical width constant, and the
+# banner wraps into more lines as the text grows, which is the right way round.
+BANNER_PIXELS = 1000
+# The banner's tallest it is ever allowed to make the window, in pixels. Beyond
+# this it scrolls internally. Sized to hold four short paragraphs at the default
+# font with room to spare, so it is invisible until the text is large.
+BANNER_MAX_H = 220
+# Measured on the default font: a character is about 0.65px per px of font
+# size. Only the ratio matters -- test-popup-gui.py asserts the window fits the
+# screen rather than trusting either number here.
+BANNER_PX_PER_CHAR = 0.65 * FONT_DEFAULT
+
+
+def banner_cols(font_size: int) -> int:
+    """
+    The character count whose pixel width is `BANNER_PIXELS` at this font size.
+
+    The banner is what sizes the window, and `set_width_chars` counts
+    characters -- so a constant char count is a *pixel* width that moves with
+    the font. At 40px the banner asked for 3778px on a 1366px screen.
+
+    Floored at 40 characters so a very large font wraps rather than asking for
+    a zero-width label.
+    """
+    per_char = max(1.0, BANNER_PX_PER_CHAR * font_size / FONT_DEFAULT)
+    return max(40, int(BANNER_PIXELS / per_char))
+
+
+def scaled_css(css: bytes, size: int) -> bytes:
+    """
+    The same stylesheet with every `font-size: Npx` multiplied by the scale.
+
+    One stylesheet scaled, rather than a stylesheet per size. The alternative
+    -- keeping a dict of variants -- means every font-size added to the CSS
+    afterwards is wrong in every variant but one, and nothing says so.
+
+    Rounding is up to a whole pixel and the scale is clamped to 1/8 of a pixel,
+    so a size of 7 does not collapse the 9px chip to 1px. Sizes below
+    FONT_MIN/FONT_MAX never reach here, but the function is not allowed to
+    depend on its caller having checked.
+    """
+    scale = max(0.125, size / FONT_DEFAULT)
+
+    def bump(match: "re.Match[bytes]") -> bytes:
+        return (match.group(1)
+                + str(max(1, round(int(match.group(2)) * scale))).encode("ascii")
+                + match.group(3))
+
+    return _SIZE_RE.sub(bump, css)
 
 
 def _short(text: str, limit: int) -> str:
@@ -1959,6 +2073,7 @@ class Window(Gtk.Window):
         self.set_position(Gtk.WindowPosition.CENTER)
         self.store = store
         self.set_default_size(900, 620)
+        self.font_size = load_font_size()
         self.rows: list[dict] = []
         # The two view controls, kept as state rather than read back off their
         # widgets. reload() runs after every write, and a sort or a search that
@@ -1984,28 +2099,20 @@ class Window(Gtk.Window):
                 min(720, int(sh * 0.80)),
             )
 
-        css = Gtk.CssProvider()
-        css.load_from_data(CSS)
+        # One provider, kept and reloaded, rather than a new one per click.
+        # add_provider_for_screen stacks providers, so replacing it each time
+        # would leave the old ones behind and the size would only ever climb.
+        self._css = Gtk.CssProvider()
+        self._css.load_from_data(scaled_css(CSS, self.font_size))
         Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            Gdk.Screen.get_default(), self._css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(root)
 
         # ---- header
-        # The banner's wrap width, in characters.
-        #
-        # This number is what sizes the window. An unwrapped Gtk.Label asks for
-        # its longest line, and any child asking for more than
-        # `set_default_size` wins -- which is how a five-paragraph banner
-        # opened this window at 2092px on a 1366px screen. Wrapping at ~150
-        # chars puts the natural width at roughly the 1100px default below, so
-        # the banner and the default agree and neither overrides the other.
-        #
-        # 150 is tuned to the default font, so `test-popup-gui.py` asserts the
-        # window actually fits the screen rather than trusting this number.
-        BANNER_COLS = 150
+        banner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
         banner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         banner.get_style_context().add_class("banner")
@@ -2022,20 +2129,39 @@ class Window(Gtk.Window):
             "archiving, restoring or deleting here."
         )
         # Wrapped, and capped, so the banner's natural width cannot set the
-        # window's. It did: this label is three long unwrapped paragraphs, and
-        # an unwrapped Gtk.Label asks for its longest line, which overrode the
-        # 1100px default and opened the window wider than the screen.
-        #
-        # `set_default_size` is only a default -- any child requesting more
-        # wins -- so the fix belongs on the label, not on the window.
+        # window's. It did: an unwrapped Gtk.Label asks for its longest line,
+        # which overrode the 1100px default and opened the window wider than
+        # the screen. `set_default_size` is only a default -- any child
+        # requesting more wins -- so the fix belongs on the label.
+        self.banner_label = h
+        _cols = banner_cols(self.font_size)
         h.set_line_wrap(True)
-        h.set_width_chars(BANNER_COLS)
-        h.set_max_width_chars(BANNER_COLS)
+        h.set_width_chars(_cols)
+        h.set_max_width_chars(_cols)
         h.get_style_context().add_class("banner-hint")
         h.set_xalign(0)
         banner.pack_start(t, False, False, 0)
         banner.pack_start(h, False, False, 0)
-        root.pack_start(banner, False, False, 0)
+        # The banner scrolls inside a bounded box rather than setting the
+        # window's height. Capping the width was not enough: at a large font the
+        # wrapped paragraphs wrap into enough lines to push the window to 783px
+        # on a 768px screen.
+        #
+        # `set_propagate_natural_height(False)` and `set_size_request` are
+        # **insurance, not the fix** -- the mutation runs removed each of them
+        # on its own and the window still fit at every size, because the
+        # ScrolledWindow is what does the work. Kept because a different theme
+        # or GTK build may measure the wrapped label differently, and because
+        # the intent ("the banner is never taller than this") is worth stating
+        # where the height is set. Worth knowing before anyone "simplifies" one
+        # away assuming the other covers it -- neither demonstrably does.
+        banner_box = Gtk.ScrolledWindow()
+        banner_box.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        banner_box.set_propagate_natural_width(False)
+        banner_box.set_propagate_natural_height(False)
+        banner_box.set_size_request(-1, BANNER_MAX_H)
+        banner_box.add(banner)
+        root.pack_start(banner_box, False, False, 0)
 
         # ---- toolbar: sort toggle and search
         #
@@ -2094,6 +2220,15 @@ class Window(Gtk.Window):
         # narrow tile. With AUTOMATIC the row scrolls instead, so an action is
         # always reachable however little width there is.
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        # Stop the list sizing the window. A ScrolledWindow propagates its
+        # child's natural width upwards by default, so a long row can ask the
+        # window to be wider than the screen.
+        #
+        # This does not change the scroll policy above: a row wider than the
+        # window still scrolls, it just no longer decides how wide the window
+        # is. That distinction is the whole point of the two calls.
+        scroller.set_propagate_natural_width(False)
+        scroller.set_propagate_natural_height(False)
         self.listbox = Gtk.ListBox()
         # SINGLE, not NONE: right-click has to leave a visible selection, or
         # there is no confirmation of which session an action would hit.
@@ -2131,6 +2266,29 @@ class Window(Gtk.Window):
         )
         db_btn.connect("clicked", lambda *_: self._show_database_stats())
         footer.pack_end(db_btn, False, False, 0)
+
+        # A-, A+ and Reset, matching opencode-popup-window's info-window so the
+        # two behave the same way in the same place. Packed between Database and
+        # Close rather than at either end: they adjust what you are reading, so
+        # they belong next to the content, and Close stays last because it is
+        # the only irreversible-looking thing there.
+        smaller = Gtk.Button(label="A-")
+        smaller.set_tooltip_text(
+            f"Smaller text. Also Ctrl+minus. Smallest is {FONT_MIN}px.")
+        smaller.connect("clicked", lambda *_: self.set_font_size(self.font_size - FONT_STEP))
+        footer.pack_end(smaller, False, False, 0)
+
+        bigger = Gtk.Button(label="A+")
+        bigger.set_tooltip_text(
+            f"Bigger text. Also Ctrl+plus. Largest is {FONT_MAX}px.")
+        bigger.connect("clicked", lambda *_: self.set_font_size(self.font_size + FONT_STEP))
+        footer.pack_end(bigger, False, False, 0)
+
+        reset_size = Gtk.Button(label="Reset size")
+        reset_size.set_tooltip_text(
+            f"Back to the default {FONT_DEFAULT}px. Also Ctrl+0.")
+        reset_size.connect("clicked", lambda *_: self.set_font_size(FONT_DEFAULT))
+        footer.pack_end(reset_size, False, False, 0)
 
         close = Gtk.Button(label="Close window")
         close.connect("clicked", lambda *_: self.destroy())
@@ -2904,11 +3062,46 @@ class Window(Gtk.Window):
         else:
             self._toast("Nothing was deleted.", error=True)
 
+    def set_font_size(self, size: int, persist: bool = True) -> None:
+        """
+        Change the text size now, and remember it for the next window.
+
+        The CSS is reloaded rather than a provider added, because
+        `add_provider_for_screen` *stacks* providers -- adding one per press
+        would leave every previous one in place, and the text would only ever
+        grow no matter how many times Reset was clicked.
+        """
+        size = max(FONT_MIN, min(FONT_MAX, size))
+        if size == self.font_size:
+            return
+        self.font_size = size
+        self._css.load_from_data(scaled_css(CSS, size))
+        # The banner's wrap width is in characters and the text just changed
+        # size, so it has to be re-derived. Missed this the first time, and a
+        # window opened at a large saved size came out 3778px wide.
+        if getattr(self, "banner_label", None) is not None:
+            _cols = banner_cols(size)
+            self.banner_label.set_width_chars(_cols)
+            self.banner_label.set_max_width_chars(_cols)
+        if persist:
+            save_font_size(size)
+
     def on_key(self, _widget, event) -> bool:
         if event.keyval == Gdk.KEY_F5:
             # Kept as an undocumented convenience even though there is no
             # Refresh button. Harmless, and useful when debugging a stale read.
             self.reload()
+            return True
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        if ctrl and event.keyval in (Gdk.KEY_plus, Gdk.KEY_equal,
+                                     Gdk.KEY_KP_Add):
+            self.set_font_size(self.font_size + FONT_STEP)
+            return True
+        if ctrl and event.keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
+            self.set_font_size(self.font_size - FONT_STEP)
+            return True
+        if ctrl and event.keyval in (Gdk.KEY_0, Gdk.KEY_KP_0, Gdk.KEY_KP_Insert):
+            self.set_font_size(FONT_DEFAULT)
             return True
         if event.keyval == Gdk.KEY_Escape:
             # In the search box, Escape clears it rather than closing the

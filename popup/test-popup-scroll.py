@@ -83,6 +83,10 @@ rows_shown = len([r for r in win.listbox.get_children()
 check(f"all {total} sessions are in the listbox", rows_shown == total,
       f"{rows_shown} rows")
 
+# The scroller holding the **list**, found by what it contains rather than by
+# being the only one. The banner is a ScrolledWindow too now -- it scrolls
+# internally at large font sizes -- so "exactly one ScrolledWindow" was an
+# assumption about the window's shape rather than a statement about scrolling.
 scrollers = []
 def walk(w):
     if isinstance(w, Gtk.ScrolledWindow):
@@ -91,10 +95,27 @@ def walk(w):
         for ch in w.get_children():
             walk(ch)
 walk(win)
-check("a ScrolledWindow exists", len(scrollers) == 1, f"{len(scrollers)} found")
+check("the window has a scrolled area", len(scrollers) >= 1,
+      f"{len(scrollers)} found")
 
-if scrollers:
-    sc = scrollers[0]
+# The one holding the listbox. A GTK3 ScrolledWindow wraps its child in a
+# Viewport, so the check looks one level in rather than assuming the child is
+# the listbox itself.
+def _scrolled(w):
+    """The scrolled widget under a ScrolledWindow, through its Viewport."""
+    inner = w.get_child()
+    if inner is None:
+        return None
+    return inner.get_child() if isinstance(inner, Gtk.Viewport) else inner
+
+
+list_scroller = next((s for s in scrollers
+                      if isinstance(_scrolled(s), Gtk.ListBox)), None)
+check("and one of them scrolls the session list", list_scroller is not None,
+      f"scrollers hold: {[type(_scrolled(s)).__name__ for s in scrollers]}")
+
+if list_scroller is not None:
+    sc = list_scroller
     hadj, vadj = sc.get_hadjustment(), sc.get_vadjustment()
     viewport = sc.get_child()
     upper = vadj.get_upper()

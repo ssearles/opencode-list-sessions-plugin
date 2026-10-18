@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (157) + the five popup suites (390 checks)
+npm test          # node --test test/ (157) + the five popup suites (416 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -299,10 +299,10 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 158 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, and that the window fits the screen |
+| `popup/test-popup-gui.py` | 183 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
-| `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
+| `popup/test-popup-scroll.py` | 7 | Many sessions stay reachable; the scrollbar is real |
 | `popup/test-popup-stats.py` | 160 | Per-session and whole-store figures, section folding, the Copy path, the environment probe, machine and CPU identity, USB ports |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
 | `popup/test-info-save.py` | 23 | Save naming, timestamp collisions, markdown vs text output |
@@ -555,6 +555,56 @@ version assertion passes forever on a box where all three installs agree — whi
 is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
+
+### Text Size: A-, A+ And Reset, And The Width It Broke Twice
+Mirrors `opencode-popup-window`'s info-window — same names, same bounds
+(`FONT_MIN` 7 / `DEFAULT` 11 / `MAX` 40 / `STEP` 2), same `Ctrl+plus`,
+`Ctrl+minus`, `Ctrl+0`, same saved-to-a-file-in-`~/.config` shape. The two repos
+deliberately share no code, so this is a **copy that has to be kept in step**,
+like `windowCommand()`. The preference lives at
+`~/.config/session-list-popup/font-size`.
+
+**The CSS is scaled, not duplicated per size.** `scaled_css()` multiplies every
+`font-size: Npx` by `size / FONT_DEFAULT`. The alternative — a stylesheet per
+size — means every font-size added to the CSS afterwards is wrong in every
+variant but one, and nothing says so. Identity at `FONT_DEFAULT`, which is
+asserted, so adding the scale changed nothing for anyone who never presses a
+button.
+
+The regex is anchored on `font-size:` deliberately. CSS in this file also
+carries `padding`, `border-radius` and `border-bottom` values, and a greedy
+`\d+px` rewrites those too, shifting the layout under the user's hands.
+
+**`set_font_size` reloads the provider it has; it does not add another.**
+`add_provider_for_screen` *stacks*, so a window that registers one per press
+leaves every earlier one underneath and Reset cannot undo it. Tested by
+provider **identity**, not by counting — style providers are held by the style
+context and cannot be walked from the widget tree, which is what an earlier
+version of the test tried to do.
+
+Two widths came out of this, and both were the same bug wearing a different hat:
+
+1. **`set_width_chars` counts CHARACTERS.** 150 chars is ~1078px at 11px and
+   ~3900px at 40px, so adding text-size controls turned the banner back into a
+   width control — a window opened at a large saved size came out **3778px on a
+   1366px screen**. `banner_cols()` now derives the char count from the font so
+   the *pixel* width is constant, and `set_font_size` re-derives it on every
+   change. Asserted on the **live** window, because only a fresh window's size
+   catches the construction path and pressing A+ is what a person does.
+2. **The wrapped paragraphs got tall enough** to push the window to 783px on a
+   768px screen. The banner now scrolls inside a bounded box.
+
+`set_propagate_natural_height(False)` and the banner's `set_size_request` are
+**insurance, not the fix** — removing either alone changed nothing measurable,
+because the ScrolledWindow is what does the work. Kept for a different theme or
+GTK build, and commented so nobody "simplifies" one away assuming the other
+covers it.
+
+`test-popup-scroll.py` asserted the window contained **exactly one**
+`ScrolledWindow`. That was a statement about the window's shape, not about
+scrolling, and the banner made it false. It now finds the scroller that
+**holds the listbox**, looking through the `Gtk.Viewport` that GTK3 wraps
+children in.
 
 ### The Banner Sized The Window, And No Test Measured The Window
 A five-paragraph banner opened this window at **2092px on a 1366px screen**.
