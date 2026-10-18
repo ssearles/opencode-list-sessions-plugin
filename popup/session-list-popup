@@ -2000,9 +2000,15 @@ class Window(Gtk.Window):
         t.get_style_context().add_class("banner-title")
         t.set_xalign(0)
         h = Gtk.Label(
-            label="Right-click a session to open its buttons: Archive or "
+            label="Right-click a session to open its buttons: Stats, Archive or "
             "Restore, Transcript.md, Export .json, Delete, and Close to back "
             "out without doing anything.\n\n"
+            "Stats is read-only and says what one session cost in size, money and "
+            "tokens -- plus its models and every file it touched. The Database "
+            "button at the bottom right is the same report for the whole store, "
+            "and adds this machine: which CPU and laptop it is, how much memory "
+            "and disk are free, and which USB ports are running at 3.0 or 2.0. "
+            "Between them they answer \"why is this slow on this laptop\".\n\n"
             "The three buttons pick the order -- by name, by when a session "
             "started, or by when it was last touched -- and the box beside them "
             "filters on title, id and folder as you type. Both apply to "

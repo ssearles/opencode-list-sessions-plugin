@@ -20,7 +20,7 @@ import { join } from "node:path"
 import { after, before, describe, it } from "node:test"
 
 import { SessionStore } from "../src/db.ts"
-import { __menu, __pickByNumber, __inventory, __parseArgs, __stripAnsi as stripAnsi } from "../index.ts"
+import { __menu, __pickByNumber, __inventory, __storeTotals, __parseArgs, __stripAnsi as stripAnsi } from "../index.ts"
 import type { SessionRow } from "../src/db.ts"
 
 const SCHEMA = `
@@ -137,6 +137,56 @@ describe("prompt text parsing", () => {
 })
 
 describe("/list inventory", () => {
+  it("puts store-wide totals at the foot of the listing", async () => {
+    // Only what list() already returns. The stats engine is Python and is not
+    // ported here, so this must not grow a second copy of that SQL -- which is
+    // asserted below rather than left to review.
+    const all = await rows()
+    const out = __inventory(all)
+    assert.match(out, /\*\*Totals\*\*/, "the listing must carry store totals")
+
+    const wantArchived = all.filter((r) => r.archived).length
+    assert.ok(
+      out.includes(`${all.length} sessions (${wantArchived} archived)`),
+      `totals must count sessions and archived from the same rows: ${out.slice(-400)}`,
+    )
+    const known = all.filter((r) => r.messages !== null)
+    const wantMessages = known.reduce((n, r) => n + (r.messages ?? 0), 0)
+    assert.ok(
+      out.includes(`${wantMessages.toLocaleString()} messages`),
+      `message total must match the rows: want ${wantMessages}`,
+    )
+
+    // The scoping sentence is the point. A totals figure that looks complete
+    // is worse than one that admits where the rest of it lives.
+    assert.match(out, /\*\*Stats\*\*/, "the listing must say where per-session figures are")
+    assert.match(out, /\*\*Database\*\*/, "and where the whole-store report is")
+
+    // The duplication guard. If someone ports the engine, this is what says no.
+    for (const forbidden of ["CPU", "GDK_SCALE", "usb", "resident"]) {
+      assert.ok(
+        !out.includes(forbidden),
+        `the text listing must not carry machine detail (${forbidden})`,
+      )
+    }
+  })
+
+  it("does not invent a message count where the store could not read one", () => {
+    // `messages: null` means uncounted, which is not zero. Summing it as zero
+    // reports a total that looks measured.
+    const out = __storeTotals([
+      { id: "a", title: "A", directory: "/d", created: 1, updated: 2, archived: null, messages: 10 },
+      { id: "b", title: "B", directory: "/d", created: 1, updated: 2, archived: null, messages: null },
+    ])
+    assert.match(out, /10 messages \(1 not countable\)/, out)
+    assert.ok(!/10 messages\b(?! \()/.test(out), `uncounted must be flagged: ${out}`)
+  })
+
+  it("has no totals to report for an empty store", () => {
+    assert.equal(__storeTotals([]), "")
+    assert.equal(__inventory([]), "No sessions found.")
+  })
+
   it("orders rows newest-first within each section, like the window", async () => {
     // The store returns time_updated DESC and the popup window opens in the
     // same order, so this listing does too. It used to sort alphabetically,

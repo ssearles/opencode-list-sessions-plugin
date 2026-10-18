@@ -393,6 +393,51 @@ function inventoryRow(r: SessionRow): string {
 }
 
 /**
+ * Store-wide totals for the foot of the `/list_sessions` listing.
+ *
+ * Deliberately only what `list()` already returns. The full stats engine —
+ * bytes, cost, tokens, per-model breakdowns, the environment and process
+ * probes — lives in the popup window's Python and is not ported here, because
+ * a second copy of that SQL is a second thing to keep correct and this repo
+ * already has one duplicated rule (the sort order) that needed tests to hold
+ * it together.
+ *
+ * So this answers "how much is in here" and the Database button answers "what
+ * is in here". The last line says so, because a totals figure that looks
+ * complete is worse than one that admits its own scope.
+ */
+function storeTotals(all: SessionRow[]): string {
+  if (all.length === 0) return ""
+  const archived = all.filter((r) => r.archived).length
+  // `messages` is null when the store could not count them, which is a
+  // different statement from zero. Summed as known and flagged if incomplete.
+  const known = all.filter((r) => r.messages !== null)
+  const messages = known.reduce((sum, r) => sum + (r.messages ?? 0), 0)
+  const counts = known.length === all.length
+    ? `${messages.toLocaleString()} messages`
+    : `${messages.toLocaleString()} messages (${all.length - known.length} not countable)`
+
+  const dates = all.map((r) => r.updated ?? r.created ?? 0).filter((t) => t > 0)
+  let span = ""
+  if (dates.length) {
+    const oldest = new Date(Math.min(...dates))
+    const newest = new Date(Math.max(...dates))
+    span = oldest.toDateString() === newest.toDateString()
+      ? `last touched ${newest.toDateString()}`
+      : `touched ${oldest.toDateString()} to ${newest.toDateString()}`
+  }
+
+  return [
+    `**Totals** — ${all.length} sessions (${archived} archived), ${counts}`,
+    ...(span ? [span] : []),
+    "",
+    "Per-session figures, costs and tokens are in the popup window: the **Stats**",
+    "button on a row, or **Database** in the footer for the whole store and this",
+    "machine's environment.",
+  ].join("\n")
+}
+
+/**
  * `/list_sessions` — the whole inventory: working sessions first, then archived.
  *
  * A read-only reference rather than a numbered menu, and deliberately
@@ -444,13 +489,15 @@ function inventory(all: SessionRow[], limit = 60): string {
   if (archived.length) sections.push(block("Archived — Restore from the popup window", archived).join("\n"))
 
   const hidden = all.length > limit * 2 ? ["", "Some sessions were omitted."] : []
+const totals = storeTotals(all)
 
   return [
     ...sections,
     ...hidden,
     "",
-    "Archive and restore from the `session-list-popup` window: right-click a",
-      "session there for an Archive or Restore button on it.",
+    "Archive and restore from the `session-list-popup` window: right-click a session " +
+      "there for an Archive or Restore button on it.",
+    ...(totals ? ["", totals] : []),
   ].join("\n\n")
 }
 
@@ -473,8 +520,8 @@ function inventory(all: SessionRow[], limit = 60): string {
  * line exists for — is last but close enough to survive.
  */
 const LIST_SESSIONS_DESCRIPTION =
-  "Archive, Restore, Transcript.md, Export .json, Delete — right-click a row, " +
-  "nothing to type"
+  "Stats, Archive, Restore, Transcript.md, Export .json, Delete — right-click a " +
+  "row, nothing to type"
 
 /**
  * Frame a report as a status note rather than a request.
@@ -525,8 +572,12 @@ function popupOpenedNote(): string {
       "It lists every session — unarchived first, then archived, each section " +
         "most recently modified first, with Name and Start date one click away. " +
         "The user drives it with the mouse: right-click a row " +
-        "for that session's buttons, Archive or Restore, Transcript.md, " +
+        "for that session's buttons, Stats, Archive or Restore, Transcript.md, " +
         "Export .json, Delete, and Close to back out without writing anything.",
+      "",
+      "Stats is read-only: what one session took in size, cost and tokens, its " +
+        "models, and every file it touched. Database, in the window's own footer, " +
+        "is that report for the whole store and adds this machine's environment.",
       "",
       "`/list_sessions --text` prints the same list into the conversation " +
         "instead of opening a window.",
@@ -1063,6 +1114,7 @@ export const __stripAnsi = stripAnsi
 export const __emphasizeNumbers = emphasizeNumbers
 export const __pickByNumber = pickByNumber
 export const __inventory = inventory
+export const __storeTotals = storeTotals
 /** Exposed for tests: prompt-text argument parsing. */
 export const __parseArgs = parseArgs
 /** Exposed for tests: the status framing, and both `/list_sessions` reports. */

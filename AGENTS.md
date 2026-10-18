@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (152) + the five popup suites (370 checks)
+npm test          # node --test test/ (157) + the five popup suites (381 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -299,7 +299,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 138 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing |
+| `popup/test-popup-gui.py` | 149 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner's button list |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
@@ -549,6 +549,49 @@ version assertion passes forever on a box where all three installs agree — whi
 is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
+
+### Four Places Enumerate The Window's Buttons, And They Drifted
+The window's banner, the palette line, `popupOpenedNote()` and the row strip
+all list the actions. The banner and the palette line both described a window
+with **no Stats button** — they predate the stats feature and nothing compared
+them against the widgets. Two checks now close that:
+
+- `test/status.test.ts` pulls the button labels out of `popup/session-list-popup`
+  with `Gtk\.Button\(label="([^"]+)"` and requires the report and the palette
+  line to name them.
+- `test-popup-gui.py` reads the **rendered** banner label — the banner-hint
+  classed one, walked off the live widget tree — and checks the sentence that
+  enumerates the buttons.
+
+That second one was wrong twice. It checked the whole banner for "Stats", which
+passed against a banner with Stats deleted from the list, because the paragraph
+*below* also says Stats. And its first regex stopped the button list at the
+period in `Transcript.md`. So it now isolates the sentence — `open its
+buttons:(.*?)\.(?=\s|$)`, with the lookahead rather than a bare `.` — and
+separates the list checks from the prose checks.
+
+### Store Totals In The Text Listing, And Nothing More
+`/list_sessions --text` ends with a **Totals** line — sessions, archived,
+messages, date span — computed from `list()` alone. The stats engine is Python
+and is **not** ported to TypeScript: a second copy of that SQL is a second thing
+to keep correct, and this repo already has one duplicated rule (the sort) that
+needed tests to hold it together. So the text page answers "how much is in
+here" and the Database button answers "what is in here", and the listing says
+so — a totals figure that looks complete is worse than one that admits its
+scope.
+
+`messages: null` is **uncounted, not zero**, and summing it as zero reports a
+total that looks measured. Uncountable sessions are counted separately and the
+line says how many.
+
+`test/menu.test.ts` asserts the machine-detail words (`CPU`, `GDK_SCALE`, `usb`,
+`resident`) do *not* appear in the text listing. That is the guard on the
+decision, not a description of it — if someone ports the engine, this is what
+says no.
+
+Fixing that also removed a pre-existing formatting bug: the closing sentence was
+split across two array elements, so `.join("\n\n")` put a blank line in the
+middle of it.
 
 ### The Machine Is Identified, Not Fingerprinted
 `machine` and `cpu` sit at the top of the footer report. Both are here because

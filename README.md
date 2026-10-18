@@ -49,10 +49,55 @@ driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
 
 | Command | Effect |
 | --- | --- |
-| `/list_sessions` | List every session — working first, then archived |
-| `/archive_Put [num \| id \| title]` | Archive a current session |
-| `/archive_Pull [num \| id \| title]` | Restore an archived session |
-| `/save [path.md]` | Write the session to Markdown |
+| `/list_sessions` | Opens the session popup window |
+
+**`/archive_Put`, `/archive_Pull` and `/save` were removed.** Archiving,
+restoring, deleting, transcripts and JSON export are all buttons in the popup
+window now, because they are click targets rather than things worth typing.
+The `session_archive` tools below are unchanged — archive and restore are still
+agent-callable.
+
+## Stats
+
+Two **read-only** reports, both in their own window. Neither writes anything.
+
+| Where | Button | Reports |
+| --- | --- | --- |
+| Any session row | **Stats** | That session alone: size, cost, tokens, activity, models, tools, and every file it touched |
+| The window's footer | **Database** | The whole store, plus the machine: sessions, messages, cost, largest sessions, and this machine's environment |
+
+Sections are foldable and folded by default when long, so a report is not a
+scrollbar of file paths. **Copy** puts the whole report — folded sections
+included — on the clipboard.
+
+`Database` also carries the machine, because "why is this slow on this laptop"
+is a question the per-session figures cannot answer:
+
+```
+machine                LENOVO Lenovo ideapad FLEX 4-1470
+                       notebook   type 80SA   bios 0VCN22WW(V1.06)
+cpu                    Intel(R) Pentium(R) CPU 4405U @ 2.10GHz
+                       2 cores / 4 threads   2.10 GHz   cache 2048 KB
+memory                 3,760 MB total   1,342 MB available   swap 11,383 MB
+usb ports, at the speed they actually negotiated:
+  2-2     5,000 Mbps  USB 3.0 / 3.2 Gen1  USB 3.2.1 FD  →  sdb1 at /run/media/...
+```
+
+Two figures there are worth knowing are honest: **core count is physical, not
+logical** (`os.cpu_count()` returns hyperthreads and would report this 2-core
+chip as 4), and **USB speed is what the port negotiated**, not what the device
+advertises. A drive on a 480 Mbps port is a dozen times slower than the same
+drive on a 5 Gbps one, and nothing else in the report tells them apart.
+
+Serial numbers and UUIDs are deliberately not collected.
+
+### Files touched
+
+Grouped by **directory on its own line, in full**, with filenames indented
+beneath it and **every** file listed. The earlier form — one truncated path per
+line — was unreadable, because `_short` keeps the tail, so the part naming which
+project it was got eaten and two rows both reading `…fault Project/` were
+indistinguishable.
 
 ### Numbered menus, and why `/list_sessions` has no numbers
 
@@ -96,21 +141,12 @@ An ambiguous term resolves to **nothing** rather than guessing: a title fragment
 matching two sessions asks you to be more specific instead of picking one. This
 matters more for `/archive_Pull`, which is a write.
 
-### `/save`
+### Transcripts
 
-Output defaults to `~/Downloads/<session title>.md`, named from the session's own
-title read at run time. Set `OPENCODE_TRANSCRIPT_DIR` to change the folder.
-
-`~/Downloads` is the same folder the popup window's **Transcript.md** button
-writes to, so there is one place transcripts land whichever tool you use.
-
-```
-/save                  →  ~/Downloads/archiving-older-ai-conversations.md
-/save ~/Desktop/today.md
-```
-
-Filenames come from the title, so two sessions sharing a title will overwrite
-each other — pass an explicit path to keep both.
+`/save` is gone — the popup window's **Transcript.md** button does it, and does
+it better. It writes `~/Downloads/<session title>.md` and decodes the ~200KB
+base64 blobs of pasted screenshots into real PNGs beside the file, which
+`/save` never did. `OPENCODE_TRANSCRIPT_DIR` went with the command.
 
 ## Where the output goes
 
@@ -146,11 +182,16 @@ Namespaced `session_archive.*`, so they cannot shadow a core tool:
 
 ## Safety
 
-- `/save` and `/list_sessions` are **read-only**.
-- `/archive_Put` and `/archive_Pull` **do** write, and take a `VACUUM INTO`
+- `/list_sessions`, the **Stats** and **Database** reports, and transcript
+  reading are **read-only**.
+- Archiving, restoring and deleting **do** write — from the popup window, and
+  agent-callably through the `session_archive` tools. They take a `VACUUM INTO`
   snapshot first, which is consistent while OpenCode holds the database open in
   WAL mode. They only ever set `time_archived` and `time_updated` — never a
   message. The three most recent snapshots are kept and older ones pruned.
+- The window refuses to archive or delete the session it was opened from, which
+  arrives as `--current` and is authoritative over the `time_suspended`
+  timestamp.
 - Schema-agnostic: discovers `session_v2` (v2.x) or `session` (v1.x) and
   introspects its columns rather than hardcoding either.
 

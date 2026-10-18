@@ -7,6 +7,7 @@ Archive button is pressed, so the wiring a screenshot cannot show is what gets
 tested. Never run against the real database.
 """
 
+import re
 import datetime
 import importlib.machinery
 import importlib.util
@@ -1038,6 +1039,57 @@ def main():
                           {r.session_id for r in session_rows(win)})
         finally:
             pop.Gtk.MessageDialog = real_msg
+
+        print("\nthe banner describes the buttons the window actually has")
+        # The banner is the first thing seen when /list_sessions opens, and it
+        # went stale for a long time: it described a window with no Stats
+        # button, because it was written before the stats feature and nothing
+        # compared it against the widgets. Read the rendered label rather than
+        # the source, so this is what a user would actually see.
+        banner_text = ""
+        found_labels = 0
+
+        def walk_banner(w):
+            nonlocal banner_text, found_labels
+            if isinstance(w, Gtk.Label):
+                found_labels += 1
+                if "banner-hint" in w.get_style_context().list_classes():
+                    banner_text += (w.get_text() or "") + "\n"
+            if isinstance(w, Gtk.Container):
+                for ch in w.get_children():
+                    walk_banner(ch)
+
+        walk_banner(win)
+        check("the banner is found at all", banner_text.strip() != "",
+              f"walked {found_labels} labels, "
+              f"{len(banner_text)} chars classed banner-hint")
+
+        # The sentence that enumerates the buttons, not the whole banner.
+        # Checking the whole thing passed against a banner with Stats deleted
+        # from the list, because the paragraph below it also says "Stats".
+        stripped = " ".join(banner_text.split())
+        # A lookahead, not a bare `.` -- "Transcript.md" has a period in the middle of
+        # it, so the first version of this truncated at "Transcript."
+        m = re.search(r"open its buttons:(.*?)\.(?=\s|$)", stripped)
+        check("the button list is found in the banner", m is not None,
+              stripped[:140])
+        button_list = m.group(1) if m else ""
+        check("it names the per-session Stats button", "Stats" in button_list,
+              button_list)
+        for action in ("Archive", "Transcript.md", "Export .json", "Delete"):
+            check(f"the button list still names {action}", action in button_list)
+        check("and says Close does nothing", "Close" in button_list, button_list)
+
+        # Those are checked against the banner as a whole, because they are
+        # prose rather than a list.
+        check("it explains the footer Database button", "Database" in banner_text)
+        check("and says the reports are read-only", "read-only" in banner_text)
+        # Keyed on what only that paragraph says. Checking for "machine" was
+        # satisfied by "this machine's environment" in the sentence above, so
+        # deleting the whole paragraph passed it.
+        check("and says what the machine report adds",
+              re.search(r"usb|3\.0|cpu|laptop", banner_text, re.I) is not None,
+              "the banner should say Database covers cpu/laptop/usb")
 
         print("\nthe real database was not modified by this run")
         # Compare against the state captured at the start, not against "no

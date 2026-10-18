@@ -100,11 +100,39 @@ describe("/list_sessions reports are status, not instructions", () => {
     }
   })
 
+  it("advertises the same buttons the window actually has", () => {
+    // Four places enumerate the window's buttons: the window's own banner, the
+    // palette line, this note, and the row strip itself. They drifted once --
+    // the banner described a window with no Stats button and the palette line
+    // omitted it -- and nothing caught it, because every test asserted against
+    // a hand-written list rather than against the buttons.
+    //
+    // So the labels come from the popup source. Adding a button without adding
+    // it to a list now fails here instead of shipping quietly.
+    const popup = readFileSync(join(here, "..", "popup", "session-list-popup"), "utf8")
+    const labels = [...popup.matchAll(/Gtk\.Button\(label="([^"]+)"/g)].map((m) => m[1])
+    assert.ok(labels.includes("Stats"), "the popup no longer has a Stats button")
+    assert.ok(labels.includes("Database"), "the popup no longer has a Database button")
+
+    // The two report buttons are the ones a row strip and a palette line can
+    // both be expected to name.
+    for (const action of ["Stats", "Database"]) {
+      assert.ok(
+        __popupOpenedNote().includes(action),
+        `the success report does not mention ${action}`,
+      )
+    }
+    assert.ok(
+      __listSessionsDescription.includes("Stats"),
+      "the palette line does not mention Stats",
+    )
+  })
+
   it("still tells the user what the window is for", () => {
     // The guard is not a substitute for the report. Dropping the detail would
     // make the note shorter and no less likely to be read as a request.
     const opened = __popupOpenedNote()
-    for (const expected of ["Archive or Restore", "Transcript.md", "Export .json", "Delete"]) {
+    for (const expected of ["Stats", "Archive or Restore", "Transcript.md", "Export .json", "Delete"]) {
       assert.ok(opened.includes(expected), `the success report no longer mentions ${expected}`)
     }
   })
@@ -173,12 +201,19 @@ describe("/list_sessions reports are status, not instructions", () => {
  */
 describe("the /list_sessions palette line", () => {
   it("names every action the window offers", () => {
-    for (const action of ["Archive", "Restore", "Transcript.md", "Export .json", "Delete"]) {
+    for (const action of ["Stats", "Archive", "Restore", "Transcript.md", "Export .json", "Delete"]) {
       assert.ok(
         __listSessionsDescription.includes(action),
         `the palette line no longer mentions ${action}, and that is how the removed commands are advertised`,
       )
     }
+  })
+
+  it("names the two report buttons, which are not actions on a session", () => {
+    // Database is in the window's footer rather than on a row, so it is not in
+    // the action list above and there is nothing else that would keep anyone
+    // from knowing it exists.
+    assert.match(__popupOpenedNote(), /Database/, "the opened note must name the footer report")
   })
 
   it("says the actions are clicked rather than typed", () => {
