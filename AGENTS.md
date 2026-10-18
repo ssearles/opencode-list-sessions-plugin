@@ -303,6 +303,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
+| `popup/test-popup-stats.py` | 60 | Per-session and whole-store figures, section folding, the Copy path |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
 | `popup/test-info-save.py` | 23 | Save naming, timestamp collisions, markdown vs text output |
 | `popup/test-copy-gesture.py` | 8 | Select-then-Ctrl+C survives the window closing |
@@ -455,6 +456,53 @@ that do now cannot.
 The dead `total_working` / `total_archived` locals went in the same pass. They
 were computed under a comment explaining a mechanism, and the mechanism was
 actually `len(shown) != len(data)`.
+
+## Stats: Per Session, And The Whole Store
+Two read-only reports, both in their own `StatsWindow`. **Stats** on each row,
+**Database** in the footer — the database is not a property of any one session,
+and a per-row button for it would imply otherwise, as well as putting eight
+buttons in a `FlowBox` on every row.
+
+`session_stats()` and `database_stats()` are plain functions returning dicts, so
+they are testable without a display — and the database view is deliberately
+**not** a loop over `session_stats()`. That would re-read and re-parse the whole
+database once per session, which at a few thousand messages is the difference
+between a window and a hang. Measured: 0.07s per session, 0.37s for the store.
+
+**Cost is reported even though it reads $0.00.** OpenCode writes the column for
+every session and it will not stay zero if the account ever buys tokens. Showing
+it now means the figure is there when it starts meaning something, instead of
+the report needing a cost section at the worst possible moment.
+
+**Ordered by what each number is for:** size first (the only figure that changes
+what somebody does next — archive, delete, leave it), then cost and tokens, then
+activity. Active time is computed from gaps between messages over
+`IDLE_GAP_MS`, because wall clock is mostly sleep: the laptop-setup session spans
+ten days and was worked on for hours.
+
+**Sections are `Gtk.Expander`s folded by line count** (`FOLD_AFTER_LINES`), not
+by name. A report whose numbers sit under a scrollbar of file paths is a report
+nobody reads the numbers of. Copy sends `report_text()`, so the clipboard
+carries the folded sections too.
+
+### Two bugs this shipped with, both now pinned
+The first cut **rendered perfectly while being wrong twice**, which is the whole
+argument for testing figures rather than reading them:
+
+- the byte total summed `LENGTH` over the **`type`** column instead of `data`,
+  so every session reported "2 KB" — including one that is 1.7 MB
+- models and message kinds were read from the JSON blob, but `type` is a
+  **column**, so both came back empty
+
+`test-popup-stats.py` compares the byte total against SQL and asserts the model
+list is non-empty. Neither check fails on plausible-looking wrong output.
+
+### This suite must honour `SESSION_POPUP`
+It initially loaded the repo copy unconditionally, so a mutation run reported
+**eight survivors that were really eight mutations the suite had never loaded**.
+Worth knowing because the mistake is invisible — the suite reports green
+throughout, and the mutations only "survive" in a harness that does not set the
+variable. The other popup suites already took it.
 
 ## Wording Is Tested Too, Not Just Behaviour
 A footer reading "copy an id into `/archive_Put`, `/archive_Pull` or `/session`"

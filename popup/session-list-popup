@@ -78,11 +78,13 @@ and every table keyed by `session_id`, in one transaction.
 import argparse
 import base64
 import datetime
+import json
 import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import gi
@@ -174,6 +176,244 @@ DEFAULT_SORT = "updated"
 # after the default became newest-first.
 DEFAULT_SORT_LABEL = next(label for mode, label, _f, _d in SORTS
                           if mode == DEFAULT_SORT)
+
+
+def _loads(row) -> dict:
+    """Parse a message blob, or {} for anything unreadable."""
+    try:
+        value = json.loads(row[0])
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _mb(n: int) -> str:
+    if n >= 1048576:
+        return f"{n / 1048576:,.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:,.0f} KB"
+    return f"{n:,} B"
+
+
+def _dur(ms: float) -> str:
+    minutes = ms / 60000.0
+    if minutes < 1:
+        return f"{ms / 1000:.0f}s"
+    if minutes < 90:
+        return f"{minutes:.0f}m"
+    if minutes < 1440:
+        return f"{minutes / 60:.1f}h"
+    return f"{minutes / 1440:.1f}d"
+
+
+# A gap longer than this between two messages is you having stopped, not the
+# agent thinking. Five minutes is the threshold because it is shorter than any
+# break taken while still in a task, and longer than any pause while typing.
+IDLE_GAP_MS = 5 * 60 * 1000
+
+
+def session_stats(store: Store, session_id: str) -> dict:
+    """
+    Everything worth knowing about one session, as plain data.
+
+    A function rather than a window so it can be tested without a display, and
+    so the database-wide view can reuse the per-message walk.
+
+    Cost is reported even though it reads $0.00 on a free model. The column is
+    written by OpenCode for every session and will not stay zero if the account
+    ever buys tokens or moves to a metered model, at which point this becomes
+    the number that decides which sessions were expensive. Showing it now means
+    the number is there when it starts meaning something, instead of the
+    feature needing to grow a cost section at the worst possible moment.
+    """
+    db = store._connect()  # noqa: SLF001 - same module, and one shared connection
+    rows = list(db.execute(
+        "SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq",
+        (session_id,)))
+    head = db.execute(
+        f"SELECT title, directory, cost, tokens_input, tokens_output, "
+        f"tokens_reasoning, tokens_cache_read, tokens_cache_write, model, "
+        f"agent, time_created, time_updated, time_archived, resume_attempts, "
+        f"time_idle, idle_outcome, slug "
+        f"FROM {store.table} WHERE id = ?", (session_id,)).fetchone()
+    if head is None:
+        return {}
+
+    out: dict = {
+        "id": session_id,
+        "title": head[0] or "(untitled)",
+        "directory": head[1],
+        "cost": head[2] or 0.0,
+        "tokens": {
+            "input": head[3] or 0, "output": head[4] or 0,
+            "reasoning": head[5] or 0,
+            "cache_read": head[6] or 0, "cache_write": head[7] or 0,
+        },
+        "model": head[8], "agent": head[9],
+        "created": head[10], "updated": head[11], "archived": head[12],
+        "resume_attempts": head[13] or 0,
+        "idle_outcome": head[15], "slug": head[16],
+        "messages": len(rows),
+        "bytes": sum(len(r[1] or "") for r in rows),
+    }
+
+    kinds: Counter = Counter()
+    tools: Counter = Counter()
+    files: Counter = Counter()
+    models: Counter = Counter()
+    errors = 0
+    compactions = 0
+    switches = 0
+    biggest = []
+    running = out["tokens"]["input"]
+
+    for kind, raw in rows:
+        j = _loads((raw,))
+        kinds[kind or "unknown"] += 1
+        if kind == "compaction":
+            compactions += 1
+        if kind == "model-switched":
+            switches += 1
+        if j.get("cost"):
+            running += j["cost"] or 0
+        if j.get("error"):
+            errors += 1
+        if kind == "assistant" and j.get("model"):
+            models[j["model"].get("id") or "?"] += 1
+        for part in j.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            tools[part.get("name") or "?"] += 1
+            state = part.get("state") or {}
+            if state.get("status") == "error":
+                errors += 1
+            given = state.get("input") or {}
+            for key in ("filePath", "path", "file"):
+                if given.get(key):
+                    files[str(given[key])] += 1
+                    break
+        biggest.append((len(raw or ""), (j.get("text") or "")[:90]
+                        or next((str(p.get("text", ""))[:90]
+                                 for p in j.get("content") or []
+                                 if isinstance(p, dict)
+                                 and p.get("type") == "text"), "")))
+
+    out["kinds"] = dict(kinds)
+    out["tools"] = tools
+    out["files"] = files
+    out["models"] = dict(models)
+    out["tool_calls"] = sum(tools.values())
+    out["errors"] = errors
+    out["compactions"] = compactions
+    out["switches"] = switches
+    out["biggest"] = sorted(biggest, reverse=True)[:3]
+
+    # Active time from the gaps. Wall clock is what the row already implies and
+    # it is mostly sleep: the laptop session spans ten days and was worked on
+    # for hours, so "how long did this take" needs the difference between the
+    # two to mean anything.
+    times = [j["time"]["created"] for _kind, raw in rows
+             for j in [_loads((raw,))]
+             if isinstance(j.get("time"), dict) and j["time"].get("created")]
+    times.sort()
+    active = 0
+    for earlier, later in zip(times, times[1:]):
+        active += min(later - earlier, IDLE_GAP_MS)
+    out["wall_ms"] = ((out["updated"] - out["created"])
+                      if (out["created"] and out["updated"]) else 0)
+    out["active_ms"] = active
+    out["first_msg"] = times[0] if times else None
+    out["last_msg"] = times[-1] if times else None
+    return out
+
+
+def database_stats(store: Store) -> dict:
+    """
+    The whole store, for "is any of this getting out of hand?".
+
+    Size is the headline because it is the only figure that changes what
+    somebody does next. Counts and cost are context for it.
+
+    Every message is parsed once here rather than per session, because the
+    per-session view calls this function for one session and the obvious
+    implementation -- loop the sessions, call session_stats on each -- re-reads
+    and re-parses the entire database once per row. At a few thousand messages
+    that is the difference between a window and a hang.
+    """
+    db = store._connect()  # noqa: SLF001 - one shared read
+    totals = Counter()
+    per_session: Counter = Counter()
+    files: Counter = Counter()
+    tools: Counter = Counter()
+    models: Counter = Counter()
+    kinds: Counter = Counter()
+
+    for sid, kind, raw in db.execute(
+            "SELECT session_id, type, data FROM session_message ORDER BY seq"):
+        size = len(raw or "")
+        per_session[sid] += size
+        totals["bytes"] += size
+        totals["messages"] += 1
+        j = _loads((raw,))
+        kinds[kind or "unknown"] += 1
+        if j.get("type") == "assistant" and j.get("model"):
+            models[j["model"].get("id") or "?"] += 1
+        for part in j.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            tools[part.get("name") or "?"] += 1
+            given = (part.get("state") or {}).get("input") or {}
+            for key in ("filePath", "path", "file"):
+                if given.get(key):
+                    files[str(given[key])] += 1
+                    break
+
+    rows = db.execute(
+        f"SELECT id, title, time_archived, cost, tokens_input, tokens_output, "
+        f"tokens_reasoning, tokens_cache_read, time_created FROM {store.table}"
+    ).fetchall()
+
+    on_disk = store.path.stat().st_size if store.path.exists() else 0
+    for suffix in ("-wal", "-shm"):
+        side = store.path.with_name(store.path.name + suffix)
+        if side.exists():
+            on_disk += side.stat().st_size
+
+    backups = 0
+    backup_count = 0
+    bdir = store.path.parent / "backups"
+    if bdir.is_dir():
+        for b in bdir.glob("*.db"):
+            backups += b.stat().st_size
+            backup_count += 1
+
+    cost = sum(r[3] or 0 for r in rows)
+    tokens = {
+        "input": sum(r[4] or 0 for r in rows),
+        "output": sum(r[5] or 0 for r in rows),
+        "reasoning": sum(r[6] or 0 for r in rows),
+        "cache_read": sum(r[7] or 0 for r in rows),
+    }
+
+    return {
+        "sessions": len(rows),
+        "archived": sum(1 for r in rows if r[2] is not None),
+        "messages": totals["messages"],
+        "message_bytes": totals["bytes"],
+        "on_disk": on_disk,
+        "backups_bytes": backups,
+        "backups_count": backup_count,
+        "cost": cost,
+        "tokens": tokens,
+        "kinds": dict(kinds),
+        "tools": tools,
+        "files": files,
+        "models": dict(models),
+        "sizes": {r[0]: (r[1] or "(untitled)", per_session.get(r[0], 0))
+                  for r in rows},
+        "created_range": (min((r[8] for r in rows if r[8]), default=None),
+                          max((r[8] for r in rows if r[8]), default=None)),
+    }
 
 
 def by_date(rows: list[dict], field: str = "time_updated") -> list[dict]:
@@ -713,6 +953,304 @@ row.selected .title { color: #000000; }
 """
 
 
+class StatsWindow(Gtk.Window):
+    """
+    A read-only report in its own window, for one session or the whole store.
+
+    Separate from the inventory rather than a strip or a dialog, because these
+    are numbers you read rather than act on: nothing here writes, and nothing
+    here should be one click from Delete.
+
+    Sections are `Gtk.Expander`s rather than one long block of text. The report
+    is mostly long lists -- tools, files, models -- and the three numbers that
+    give it its meaning are at the top, buried under a scrollbar of file paths.
+    Folding the long ones means the overview is readable without scrolling and
+    the detail is one click away, which is the opposite trade to a flat report.
+
+    Long sections start folded and short ones open, by line count rather than
+    by name, so the rule needs no maintenance as sections are added.
+    """
+
+    def __init__(self, title: str, sections: list[tuple[str, str]],
+                 subtitle: str = ""):
+        super().__init__(title=title)
+        self.set_type_hint(Gdk.WindowType.TOPLEVEL)
+        self._sections = sections
+
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            sw, sh = screen.get_width(), screen.get_height()
+            self.set_default_size(min(880, int(sw * 0.7)), min(760, int(sh * 0.84)))
+
+        css = Gtk.CssProvider()
+        css.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(root)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        head.get_style_context().add_class("banner")
+        t = Gtk.Label(label=title)
+        t.get_style_context().add_class("banner-title")
+        t.set_xalign(0)
+        t.set_ellipsize(3)
+        head.pack_start(t, False, False, 0)
+        if subtitle:
+            s = Gtk.Label(label=subtitle)
+            s.get_style_context().add_class("banner-hint")
+            s.set_xalign(0)
+            s.set_ellipsize(3)
+            head.pack_start(s, False, False, 0)
+        root.pack_start(head, False, False, 0)
+
+        # One TextView per section rather than one for the lot, so folding a
+        # section folds its text with it. They are inside a single scroller, so
+        # the whole report still scrolls as one column.
+        self._expanders: list[Gtk.Expander] = []
+        stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        for heading, body in sections:
+            if not heading:
+                stack.pack_start(self._view(body), False, False, 0)
+                continue
+            exp = Gtk.Expander(label=heading)
+            exp.get_style_context().add_class("stat-section")
+            exp.set_expanded(len(body.splitlines()) <= FOLD_AFTER_LINES)
+            exp.add(self._view(body))
+            stack.pack_start(exp, False, False, 0)
+            self._expanders.append(exp)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroller.add(stack)
+        root.pack_start(scroller, True, True, 0)
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        footer.get_style_context().add_class("hintbar")
+        self.status = Gtk.Label(label="Nothing here writes to the database.")
+        self.status.get_style_context().add_class("hintbar-label")
+        self.status.set_xalign(0)
+        self.status.set_ellipsize(3)
+        footer.pack_start(self.status, True, True, 0)
+
+        for label, wanted in (("Collapse all", False), ("Expand all", True)):
+            btn = Gtk.Button(label=label)
+            btn.connect("clicked", lambda *_, w=wanted: self._set_all(w))
+            footer.pack_end(btn, False, False, 0)
+
+        copy = Gtk.Button(label="Copy")
+        copy.set_tooltip_text(
+            "Copy the whole report -- folded sections included -- so it can be "
+            "pasted into a note.")
+        copy.connect("clicked", self._on_copy)
+        footer.pack_end(copy, False, False, 0)
+
+        close = Gtk.Button(label="Close")
+        close.get_style_context().add_class("footer-label")
+        close.connect("clicked", lambda *_: self.destroy())
+        footer.pack_end(close, False, False, 0)
+        root.pack_start(footer, False, False, 0)
+
+        self.show_all()
+
+    @staticmethod
+    def _view(body: str) -> Gtk.TextView:
+        view = Gtk.TextView()
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.set_left_margin(10)
+        view.set_right_margin(10)
+        view.set_top_margin(4)
+        view.set_bottom_margin(4)
+        view.get_buffer().set_text(body)
+        view.get_style_context().add_provider(
+            _report_provider(), Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        return view
+
+    def _set_all(self, expanded: bool) -> None:
+        for exp in self._expanders:
+            exp.set_expanded(expanded)
+        self.status.set_text(
+            "Every section is open." if expanded
+            else "Every section is folded away.")
+
+    def _on_copy(self, *_args) -> None:
+        """Copy through wl-copy, for the reason the main window does."""
+        proc = subprocess.run(
+            ["wl-copy"], input=report_text(self._sections).encode("utf8"),
+            capture_output=True, check=False)
+        self.status.set_text(
+            "Copied the report." if proc.returncode == 0
+            else "Could not copy - is wl-copy installed?")
+
+
+_REPORT_PROVIDER = None
+
+
+def _report_provider() -> Gtk.CssProvider:
+    """One provider, built once: the report CSS is small and constant."""
+    global _REPORT_PROVIDER
+    if _REPORT_PROVIDER is None:
+        _REPORT_PROVIDER = Gtk.CssProvider()
+        _REPORT_PROVIDER.load_from_data(REPORT_CSS)
+    return _REPORT_PROVIDER
+
+
+REPORT_CSS = b"""
+textview { font-family: monospace; font-size: 11px; }
+expander.stat-section > box > label { font-weight: 700; font-size: 11px; }
+"""
+
+
+def _short(text: str, limit: int) -> str:
+    """Trim from the left, keeping the end -- which for a path is the filename."""
+    return text if len(text) <= limit else "…" + text[-(limit - 1):]
+
+
+def _counter_rows(counter, limit: int = 12) -> list[str]:
+    """
+    The top entries of a Counter (or a plain dict of counts) as aligned lines.
+
+    Accepts a dict because some of these are handed over already converted --
+    a report that cannot show a model because the value was flattened one step
+    too early is a silly failure to debug.
+    """
+    items = (sorted(counter.items(), key=lambda kv: -kv[1])
+             if isinstance(counter, dict) else counter.most_common(limit))
+    if not items:
+        return ["  (none)"]
+    top = items[:limit]
+    # Paths are shortened from the left, keeping the tail. A truncated path that
+    # loses its filename loses the part that tells two files apart, and two
+    # sessions' worth of `Default Project/...` rows are indistinguishable
+    # otherwise. Tool names are short and pass through unchanged.
+    out = [f"  {_short(str(name), 46):<46} {count:>7,}" for name, count in top]
+    if len(items) > limit:
+        out.append(f"  ... and {len(items) - limit} more")
+    return out
+
+
+def session_sections(s: dict) -> list[tuple[str, str]]:
+    """One session, as (heading, body) pairs -- the sections the window folds."""
+    if not s:
+        return [("", "No such session.")]
+    tok = s["tokens"]
+    cache = tok["cache_read"]
+    read_ratio = (cache / (cache + tok["input"]) * 100) if (cache + tok["input"]) else 0.0
+    activity = [
+        f"  {s['tool_calls']:>12,}   tool calls"
+        f"   {s['errors']:,} of them failed",
+        f"  {s['compactions']:>12,}   context compactions",
+        f"  {s['resume_attempts']:>12,}   resume attempts",
+    ]
+    if s.get("idle_outcome"):
+        activity.append(f"  {'':>12}   last outcome: {s['idle_outcome']}")
+
+    tail = [f"  {s['title']}", f"  {s['id']}"]
+    if s.get("directory"):
+        tail.append(f"  {s['directory']}")
+    if s.get("archived"):
+        tail.append(f"  archived {stamp(s['archived'])}")
+
+    return [
+        ("SIZE",
+         f"  {_mb(s['bytes']):>12}   {s['messages']:,} messages"
+         f"   {_dur(s['wall_ms'])} wall clock"),
+        ("TIME",
+         "\n".join([
+             f"  {_dur(s['active_ms']):>12}   active, from gaps between messages"
+             f" over {IDLE_GAP_MS // 60000}m",
+             f"  {_dur(s['wall_ms'] - s['active_ms']):>12}   away from it",
+         ])),
+        ("COST AND TOKENS", "\n".join([
+            f"  ${s['cost']:>11.4f}   what this session has cost so far",
+            f"  {tok['input']:>12,}   input",
+            f"  {tok['output']:>12,}   output",
+            f"  {tok['reasoning']:>12,}   reasoning",
+            f"  {cache:>12,}   read from cache"
+            f"  ({read_ratio:.1f}% of everything sent)",
+            f"  {tok['cache_write']:>12,}   written to cache",
+        ])),
+        ("ACTIVITY", "\n".join(activity)),
+        ("MESSAGES BY KIND", "\n".join(
+            f"  {kind:<12} {count:,}" for kind, count in
+            sorted(s["kinds"].items(), key=lambda kv: -kv[1]))),
+        ("TOOLS", "\n".join(_counter_rows(s["tools"]))),
+        ("FILES TOUCHED", "\n".join(_counter_rows(s["files"], 15))),
+        ("MODELS", "\n".join(_counter_rows(s["models"]))),
+        ("SESSION", "\n".join(tail)),
+    ]
+
+
+def database_sections(d: dict) -> list[tuple[str, str]]:
+    """The whole store, as (heading, body) pairs."""
+    if not d:
+        return [("", "No sessions found.")]
+    tok = d["tokens"]
+    biggest = sorted(d["sizes"].items(), key=lambda kv: -kv[1][1])[:12]
+    created = d["created_range"]
+
+    size_lines = [
+        f"  {_mb(d['on_disk']):>12}   the database, including its write-ahead log",
+        f"  {_mb(d['message_bytes']):>12}   of which is session messages",
+        f"  {_mb(d['backups_bytes']):>12}   snapshots kept"
+        f" ({d['backups_count']}), which archiving does not touch",
+    ]
+    largest = [f"  {_mb(size):>10}  {title}" for _sid, (title, size) in biggest]
+    span = []
+    if created[0]:
+        span = [f"  first session {stamp(created[0])}",
+                f"  newest       {stamp(created[1])}"]
+
+    return [
+        ("ON DISK", "\n".join(size_lines)),
+        ("CONTENTS", "\n".join([
+            f"  {d['sessions']:>12,}   sessions, {d['archived']:,} archived",
+            f"  {d['messages']:>12,}   messages",
+        ])),
+        ("COST AND TOKENS, ALL SESSIONS", "\n".join([
+            f"  ${d['cost']:>11.4f}   in total",
+            f"  {tok['input']:>12,}   input",
+            f"  {tok['output']:>12,}   output",
+            f"  {tok['reasoning']:>12,}   reasoning",
+            f"  {tok['cache_read']:>12,}   read from cache",
+        ])),
+        ("LARGEST SESSIONS", "\n".join(largest)),
+        ("TOOLS, ALL SESSIONS", "\n".join(_counter_rows(d["tools"], 14))),
+        ("MOST TOUCHED FILES", "\n".join(_counter_rows(d["files"], 14))),
+        ("MODELS", "\n".join(_counter_rows(d["models"]))),
+        ("MESSAGES BY KIND", "\n".join(
+            f"  {kind:<12} {count:,}" for kind, count in
+            sorted(d["kinds"].items(), key=lambda kv: -kv[1]))),
+        ("SPAN", "\n".join(span)),
+    ]
+
+
+# A section longer than this starts folded. The point of the report is a feel
+# for what happened, and a scrollbar full of file paths hides the three numbers
+# that give it. Anything short enough to read at a glance stays open.
+FOLD_AFTER_LINES = 12
+
+
+def report_text(sections: list[tuple[str, str]]) -> str:
+    """Every section as plain text -- what Copy puts on the clipboard."""
+    return "\n\n".join(
+        f"{heading}\n{body}" if heading else body for heading, body in sections)
+
+
+def format_session_report(s: dict) -> str:
+    """One session, as the lines the window shows."""
+    return report_text(session_sections(s))
+
+
+def format_database_report(d: dict) -> str:
+    """The whole store, as the lines the window shows."""
+    return report_text(database_sections(d))
+
+
 class Window(Gtk.Window):
     def __init__(self, store: Store):
         super().__init__(title="OpenCode sessions")
@@ -867,6 +1405,18 @@ class Window(Gtk.Window):
         # Named "Close window", not "Close": each row's strip now has its own
         # Close that does nothing but back out of that strip, and two buttons
         # with the same name on screen at once is a trap.
+        # Database, once per window rather than once per row: see _show_database_stats.
+        db_btn = Gtk.Button(label="Database")
+        db_btn.set_tooltip_text(
+            "Open a read-only report for the whole database in its own window: "
+            "how much space it takes, how many sessions and messages, total "
+            "cost, and which sessions are largest.\n\n"
+            "Useful when deciding what to archive, since size is the figure that "
+            "changes what to do next. Nothing on it writes."
+        )
+        db_btn.connect("clicked", lambda *_: self._show_database_stats())
+        footer.pack_end(db_btn, False, False, 0)
+
         close = Gtk.Button(label="Close window")
         close.connect("clicked", lambda *_: self.destroy())
         footer.pack_end(close, False, False, 0)
@@ -1184,6 +1734,16 @@ class Window(Gtk.Window):
                 btn.connect("clicked", lambda *_: self._act(d["id"], archive=True))
         buttons.insert(btn, -1)
 
+        stats_btn = Gtk.Button(label="Stats")
+        stats_btn.set_tooltip_text(
+            "Open a read-only report for this session in its own window: how "
+            "big it is, how long you actually spent on it, what it cost, which "
+            "tools it used and which files it touched.\n\n"
+            "Nothing on that window writes to the database."
+        )
+        stats_btn.connect("clicked", lambda *_: self._show_stats(d))
+        buttons.insert(stats_btn, -1)
+
         copy_btn = Gtk.Button(label="Copy id")
         copy_btn.connect("clicked", lambda *_: self._copy_id(d["id"]))
         buttons.insert(copy_btn, -1)
@@ -1419,6 +1979,33 @@ class Window(Gtk.Window):
         clip.set_text(session_id, -1)
         clip.store()
         self.status.set_text(f"Copied {session_id}")
+
+    def _show_stats(self, d: dict) -> None:
+        """Open the per-session report in its own window."""
+        stats = session_stats(self.store, d["id"])
+        report = StatsWindow(
+            f"Session — {d['title'] or '(untitled)'}",
+            session_sections(stats),
+            f"{_mb(stats.get('bytes', 0))} · {stats.get('messages', 0):,} messages"
+            f" · opened from this window",
+        )
+        report.show_all()
+
+    def _show_database_stats(self) -> None:
+        """
+        Open the whole-store report.
+
+        Deliberately in the footer rather than on every row: the database is not
+        a property of any one session, and a per-row button for it would imply
+        it were. Eight buttons in a FlowBox also risks the one-per-line stack
+        this window's own notes warn about.
+        """
+        report = StatsWindow(
+            "OpenCode database",
+            database_sections(database_stats(self.store)),
+            f"{self.store.path}",
+        )
+        report.show_all()
 
     def _save_transcript(self, data: dict) -> None:
         """
