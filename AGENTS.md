@@ -58,7 +58,7 @@ stays buried. Restoring **must also refresh `time_updated`** to surface it.
 ## Commands (slash — must be typed, see the palette note below)
 | Command | Purpose |
 |---------|---------|
-| `/list_sessions` | Opens the session popup window; `--text` prints the list instead |
+| `/list_sessions` | Opens the session popup window, told which session opened it; `--text` prints the list instead |
 
 **`/archive_Put` and `/archive_Pull` were removed.** Archiving, restoring,
 deleting, transcript and JSON export all moved into the popup window
@@ -98,7 +98,7 @@ row to open its strip:
 
 | Button | Does |
 |--------|------|
-| Archive / Restore | The primary action; disabled on the session you are working in |
+| Archive / Restore | The primary action; refused on the session you are working in |
 | Copy id | The session id, for handing to the CLI |
 | Transcript.md | Full transcript to `~/Downloads/<title>.md` |
 | Export .json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
@@ -117,6 +117,32 @@ something is always noted when something was there.
 Hyprland floats and centres it via a rule in `~/.config/hypr/looknfeel.lua`.
 **Do not add `pin = true` to that rule**: pinning means "show on all
 workspaces", so the popup followed the user onto every workspace.
+
+**"The session you are working in" arrives as `--current`, and that is the only
+reliable source for it.** The window used to infer it from `time_suspended`,
+which OpenCode writes and this plugin does not control — a guess, and a guess
+that decides a safety rule. `is_live` gates three things: the Archive button's
+sensitivity, `set_archived`'s refusal, and `delete_session`'s. All three were
+derived from the same timestamp, so when the guess was wrong the window disabled
+Archive on some *other* row, left it enabled on the session the user was
+standing in, and the write path agreed — because it was the same wrong answer.
+That is a live Archive button on the live session, which is exactly the accident
+the rule exists to prevent.
+
+`execute: async ({ sessionID })` already had the answer in hand and passed it
+only to `say()`. It now goes to the window as `--current <id>`, and
+`Store.current` is authoritative: `list()` marks it and `_is_live()` refuses it
+without consulting the timestamp at all. The `time_suspended` heuristic remains
+as the fallback for a bare hand-run `session-list-popup`, where there is no
+caller to ask.
+
+The refusal checks `--current` **before** asking whether the schema has
+`time_suspended`, so a database without that column still refuses to archive the
+session it was opened from.
+
+`test-popup-writes.py` asserts this by pointing `time_suspended` at the *wrong*
+session and requiring `--current` to win — both in `list()` and in `_is_live()`.
+Reverting either branch fails 6 checks, so the test is not vacuous.
 
 Five things about it that are easy to get wrong:
 
@@ -203,7 +229,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/status.test.ts` | 11 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
 | `popup/test-popup-gui.py` | 84 | Widgets, buttons, strips, layout, delete dialog, export plumbing |
-| `popup/test-popup-writes.py` | 51 | The write path: archive/restore guards, delete, backups, ordering, images |
+| `popup/test-popup-writes.py` | 57 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |

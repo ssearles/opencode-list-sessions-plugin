@@ -101,9 +101,21 @@ function windowCommand(name: string, extraArgs: string[] = []): { bin: string; a
   return { error: `${name} not found (looked in ~/.local/bin and the package)` }
 }
 
-/** The session window, with no arguments. */
-function popupCommand(): { bin: string; args: string[] } | { error: string } {
-  return windowCommand("session-list-popup")
+/**
+ * The session window, told which session invoked it.
+ *
+ * `--current` is not cosmetic. The window marks that row and refuses to archive
+ * or delete it, and the refusal is a safety rule: you should not be able to
+ * archive the conversation you are standing in from inside that conversation.
+ * Guessing which session that is -- from `time_suspended`, which OpenCode writes
+ * and this plugin does not control -- gets the wrong answer whenever the guess
+ * is wrong, and the symptom is a live Archive button on the live session.
+ *
+ * The window still falls back to the heuristic when launched bare, so running
+ * `session-list-popup` by hand still marks something.
+ */
+function popupCommand(sessionID: string): { bin: string; args: string[] } | { error: string } {
+  return windowCommand("session-list-popup", ["--current", sessionID])
 }
 
 /**
@@ -113,8 +125,8 @@ function popupCommand(): { bin: string; args: string[] } | { error: string } {
  * the OpenCode server, and closing the app that ran the command takes the window
  * with it. `setsid` is belt-and-braces for the same reason.
  */
-function openPopup(): { ok: true } | { ok: false; reason: string } {
-  return launch(popupCommand())
+function openPopup(sessionID: string): { ok: true } | { ok: false; reason: string } {
+  return launch(popupCommand(sessionID))
 }
 
 /**
@@ -721,7 +733,7 @@ export default {
               await say(sessionID, inventory(await s.list()))
               return
             }
-            const launched = openPopup()
+            const launched = openPopup(sessionID)
             await say(
               sessionID,
               launched.ok

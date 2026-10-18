@@ -126,6 +126,12 @@ def main() -> int:
         check("no live marker on the copy to begin with",
               all(not d.get("is_live") for d in store.list()))
 
+        # The session standing in for "the one you are in" below. Any
+        # unarchived session does now that the marker is cleared, and picking
+        # it here rather than at use keeps every later block free to move the
+        # timestamp wherever it needs to.
+        current_id = next(d["id"] for d in store.list() if not d["archived"])
+
         # ------------------------------------------------------------- order
         print("\nordering is by name within each group")
         working = [d for d in store.list() if not d["archived"]]
@@ -193,9 +199,54 @@ def main() -> int:
         check("messages untouched by restore", msgs_of(db, target) == before_msgs)
 
         # -------------------------------------------------------- bad inputs
+        print("\nthe session you are in is marked, not guessed")
+        # `--current` is what the plugin passes, and it is authoritative. The
+        # block below covers the fallback: pointed at a different session, the
+        # window marks that one, and refuses to archive it.
+        store = pop.Store(db, current=current_id)
+        marked = next(d for d in store.list() if d["id"] == current_id)
+        check("--current is marked in list()", marked.get("is_live") is True)
+        check("--current is the only session marked",
+              sum(1 for d in store.list() if d.get("is_live")) == 1)
+        res = store.set_archived([current_id], True)
+        check("--current cannot be archived",
+              current_id not in res["changed"], str(res["errors"]))
+
+        print("\na stale time_suspended does not override --current")
+        # The exact failure this fixes: the timestamp points at the wrong
+        # session -- because it is stale, or because the client guessed -- and
+        # the window marked and refused that row instead of the live one.
+        other_id = next(d["id"] for d in store.list() if d["id"] != current_id)
+        db_stale = sqlite3.connect(db)
+        try:
+            db_stale.execute(f"UPDATE {store.table} SET time_suspended = NULL")
+            db_stale.execute(
+                f"UPDATE {store.table} SET time_suspended = ? WHERE id = ?",
+                (int(datetime.datetime.now().timestamp() * 1000), other_id),
+            )
+            db_stale.commit()
+        finally:
+            db_stale.close()
+
+        rows = store.list()
+        check("--current wins over the timestamp",
+              [d["id"] for d in rows if d.get("is_live")] == [current_id],
+              str([d["title"] for d in rows if d.get("is_live")]))
+        check("the stamped session is not marked instead",
+              not next(d for d in rows if d["id"] == other_id).get("is_live"))
+        db_chk = sqlite3.connect(db)
+        try:
+            check("the write path agrees with the marking",
+                  store._is_live(db_chk, current_id)
+                  and not store._is_live(db_chk, other_id))
+        finally:
+            db_chk.close()
+
         print("\nthe live session cannot be archived")
         # Give one session the marker the desktop app sets for the session you
-        # are working in, then prove the write path refuses it.
+        # are working in, then prove the write path refuses it. A bare Store,
+        # as launched by hand, with no --current to go on.
+        store = pop.Store(db)
         live_id = store.list()[0]["id"]
         db_live = sqlite3.connect(db)
         try:

@@ -170,8 +170,11 @@ class Store:
 
     RETAIN = 3
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, current: str | None = None):
         self.path = path
+        # The session this window was opened from, when the plugin told us.
+        # Authoritative; see resolve_live() for what happens without it.
+        self.current = current
         if not path.exists():
             raise SystemExit(f"No database at {path}")
         self._connect().close()  # fail fast and clearly
@@ -263,18 +266,30 @@ class Store:
             # Mark the session you are working in right now, so it cannot be
             # archived by accident from this window.
             #
-            # The signal is `time_suspended`: the desktop app sets it on the
-            # session that is live, and leaves it NULL on every other. Only one
-            # session carries it at a time. This is a heuristic, not a fact --
-            # a session you are only looking at has no timestamp -- so it marks
-            # the most recently active session rather than whatever happens to
-            # be on screen.
-            live = max(
-                (d for d in out if d.get("time_suspended")),
-                key=lambda d: d["time_suspended"],
-                default=None,
-            )
-            live_id = live["id"] if live else None
+            # Two ways to know, in order of trust:
+            #
+            # 1. `--current <id>`, which the plugin passes from the session the
+            #    command was typed in. That is a fact: it is the session that
+            #    opened this window, and it stays correct for as long as the
+            #    window is open even if OpenCode moves its attention elsewhere.
+            # 2. `time_suspended`, which OpenCode sets on the live session and
+            #    leaves NULL on every other. A heuristic, and the only option
+            #    when the window is launched by hand.
+            #
+            # The fallback matters less than it looks. It is also what makes the
+            # failure mode of ignoring (1) a safety bug rather than a cosmetic
+            # one: a wrong live row means Archive is disabled on the wrong
+            # session and enabled on the one you are in, and the write path
+            # refuses by the same test, so it agrees with the button. Both were
+            # derived from one guess, so the guess being wrong is enough.
+            live_id = self.current
+            if not live_id:
+                live = max(
+                    (d for d in out if d.get("time_suspended")),
+                    key=lambda d: d["time_suspended"],
+                    default=None,
+                )
+                live_id = live["id"] if live else None
             for d in out:
                 d["is_live"] = d["id"] == live_id
             return out
@@ -396,6 +411,12 @@ class Store:
         Read inside the write transaction so the check cannot race with the
         update. See list() for why `time_suspended` is the signal.
         """
+        # `--current` wins over the timestamp for the same reason list() does: it is
+        # the session this window was actually opened from. Checked before the
+        # schema question, because a database without `time_suspended` must
+        # still refuse to archive the session you are in.
+        if self.current is not None:
+            return session_id == self.current
         if "time_suspended" not in self.columns:
             return False
         row = db.execute(
@@ -434,8 +455,15 @@ def plain_text(store: Store) -> str:
                 bits.append(short_dir(d["directory"]))
             # Same wording as the plugin's /list_sessions, so the two agree on
             # what state a row is in and what can be done to it.
-            action = "Restore" if d["archived"] else "Archive"
-            state = "archived" if d["archived"] else "unarchived"
+            #
+            # The live row says so rather than promising an Archive that the
+            # write path will refuse. Text that offers an action the window
+            # itself forbids is worse than text that names the state.
+            if d.get("is_live"):
+                state, action = "this session", "cannot be archived"
+            else:
+                action = "Restore" if d["archived"] else "Archive"
+                state = "archived" if d["archived"] else "unarchived"
             bits.append(f"{state} · {action}")
             lines.append(f"     {d['id']}  ·  " + "  ·  ".join(bits))
         return lines
@@ -1579,9 +1607,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="OpenCode session inventory")
     ap.add_argument("--copy", action="store_true", help="print to stdout, no window")
     ap.add_argument("--db", help="path to opencode.db (default: the real one)")
+    ap.add_argument(
+        "--current",
+        help=(
+            "session id to mark as the live one, and refuse to archive or "
+            "delete. The plugin passes this. Without it the window falls back "
+            "to OpenCode's time_suspended timestamp, which is a guess."
+        ),
+    )
     args = ap.parse_args()
 
-    store = Store(Path(args.db) if args.db else default_db())
+    store = Store(Path(args.db) if args.db else default_db(), current=args.current)
 
     if args.copy:
         print(plain_text(store))
