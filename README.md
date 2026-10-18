@@ -29,21 +29,31 @@ screenshots pasted into the conversation.
 
 ## Install
 
+**Not published to npm** — the name below does not resolve. Point the config at
+a checkout instead:
+
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-archive-session"]
+  "plugin": ["/absolute/path/to/opencode-archive-session"]
 }
 ```
 
-Or point at a local checkout:
+The **entry point must be at the package root.** OpenCode resolves local
+plugins but does not honour `main` or `exports` pointing into a subdirectory,
+so `index.ts` lives at `/` and `src/db.ts` and `src/markdown.ts` are internal.
 
-```json
-{ "plugins": ["/absolute/path/to/opencode-archive-session"] }
-```
+Zero runtime dependencies. It declares `@opencode/plugin` as an *optional*
+peerDependency and never imports it — the types are local and structural, so
+the plugin loads under Bun, Node 22+, or neither.
 
-No dependencies are installed at runtime. The plugin uses whichever SQLite
-driver the host provides (`bun:sqlite` under Bun, `node:sqlite` under Node 22+).
+The SQLite driver is whichever the host provides: `bun:sqlite` under Bun,
+`node:sqlite` under Node 22+. The schema is discovered, not assumed — it finds
+`session_v2` or `session` and introspects the columns.
+
+**Editing `index.ts` reloads the plugin on every save**, and each reload
+re-registers every command, which visibly re-renders the palette. Commit before
+testing a batch of edits.
 
 ## Commands
 
@@ -112,47 +122,29 @@ line — was unreadable, because `_short` keeps the tail, so the part naming whi
 project it was got eaten and two rows both reading `…fault Project/` were
 indistinguishable.
 
-### Numbered menus, and why `/list_sessions` has no numbers
+### Why `/list_sessions` has no numbers
 
-`/list_sessions` shows **everything** on one screen — working sessions first,
-then archived — with each session's full id on its own line so it can be selected
-and pasted straight into another command. It is deliberately **unnumbered**.
+It used to. Two write commands printed numbered menus — `/archive_Put` over
+working sessions, `/archive_Pull` over archived — and `/list_sessions` stayed
+unnumbered because a single shared numbering would match neither menu once
+either group changed size.
 
-The numbers live in the two write commands instead. Run either with no argument
-and it prints a numbered menu over the half it acts on:
+**Both commands are gone.** Archiving, restoring, deleting, transcripts and JSON
+export are buttons in the popup window now, because they are click targets
+rather than things worth typing. With every action being a click, a number in
+front of a row became a position the reader had to hold in their head and had
+no way to use — and one that archiving immediately invalidated, since the
+session jumps sections.
 
-```
-/archive_Put        →  Current sessions
-                       1. Diagnosing 2TB external drive
-                       2. Fix missing scroll bar in Okular
-/archive_Put 2      →  Archived 1 session(s).
+So `/list_sessions` shows everything, newest-first, unarchived then archived,
+with **each session's full id printed under its title**. That id is what the
+`session_archive` tools take, so it is the one piece of information that has to
+be readable rather than clickable.
 
-/archive_Pull       →  Archived sessions
-                       1. ZZ fix verify
-/archive_Pull 1     →  Restored 1 session(s).
-```
-
-The two menus count **disjoint halves** of the database — `/archive_Put` is
-scoped to `time_archived IS NULL`, `/archive_Pull` to `IS NOT NULL`. Number 3
-means "third current session" in one and "third archived session" in the other.
-They can never collide, because the row sets do not overlap.
-
-That is exactly why `/list_sessions` carries no numbers: a single shared
-numbering would match neither menu once either group changed size.
-
-A number is only valid against the menu you were just shown. Archiving or
-restoring something in between shifts the positions, so a number that worked a
-moment ago can fall out of range. An out-of-range number is **refused, never
-reinterpreted** — `/archive_Put 99` does not fall through to a title search, so
-it can never archive a session whose title merely contains "99". Re-run the
-command with no argument to see the current menu.
-
-Passing no argument prints the menu rather than acting, because opening a command
-is never a request to archive the session you are currently in.
-
-An ambiguous term resolves to **nothing** rather than guessing: a title fragment
-matching two sessions asks you to be more specific instead of picking one. This
-matters more for `/archive_Pull`, which is a write.
+The ambiguity and out-of-range rules that used to govern typed arguments moved
+with the commands. The tools now take explicit ids, and resolve nothing on your
+behalf — an agent that passes `ses_abc123` gets that session or an error, never
+a nearby one.
 
 ### Transcripts
 
@@ -217,13 +209,26 @@ palette does nothing. A missing command from the palette is not a bug in it.
 ## Development
 
 ```bash
-npm test          # node --test test/, no install required
-npm run check     # confirms index.ts and src/db.ts load
-npm run typecheck # requires TypeScript
+npm test              # 158 plugin tests + 428 popup checks
+npm run test:plugin   # the TypeScript suite alone
+npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
+npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
+npm run check         # confirms index.ts and src/db.ts load
+npm run typecheck     # requires TypeScript
 ```
 
-The test suite builds throwaway databases in **both** schemas and runs the shared
-suite against each, so v1 and v2 support are exercised rather than assumed.
+No install step and no dependencies — the TypeScript tests build throwaway
+databases in **both** schemas and run the shared suite against each, so v1 and
+v2 support are exercised rather than assumed.
+
+The popup suites are Python. They work on `VACUUM INTO` copies and assert the
+real database is unchanged, so they are safe to run against your own data.
+**Never point them at the live database.** They default to the repo copy; set
+`SESSION_POPUP` to test an installed build instead. The GUI suite needs a
+display — it was written for Wayland, so `WAYLAND_DISPLAY` must be set.
+
+The repo copy is the source of truth for the window. Edit
+`popup/session-list-popup`, never the copy in `~/.local/bin`.
 
 See [AGENTS.md](AGENTS.md) for the architecture notes, the resolver contract, and
 the traps that have already cost time here.

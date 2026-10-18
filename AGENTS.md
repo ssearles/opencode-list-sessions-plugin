@@ -1130,10 +1130,22 @@ Test-only exports from `index.ts`: `__resolve`, `__menu`, `__pickByNumber`,
 - Default DB: `~/.local/share/opencode/opencode.db` (or `XDG_DATA_HOME/opencode/opencode.db`)
 - Override with `OPENCODE_DB` env var (used by tests)
 - Requires Node 22+ or Bun
-- The repo is **private while in testing**. It is not published to npm, and
-  `~/.config/opencode/opencode.json` loads `opencode-session-transcript` from npm
-  — so nothing here is live until you either publish or repoint that entry at
-  this checkout by absolute path.
+- The repo is **private and unpublished**. `npm view opencode-archive-session`
+  is a 404, so the README's install section points at an absolute path instead of
+  a package name.
+- **This checkout is live.** `~/.config/opencode/opencode.json` loads it by
+  absolute path, alongside `opencode-popup-window`:
+
+  ```json
+  "plugin": ["/home/steven/Documents/Default Project/opencode-session-transcript",
+             "/home/steven/Documents/Default Project/opencode-popup-window"]
+  ```
+
+  Confirm with `GET /api/plugin` → `source.type == "local"` and the absolute
+  path. A test here is a test against the running agent.
+- `popup/session-list-popup` is a **symlink** from `~/.local/bin`, so popup edits
+  are live on the next launch and need no reload. `index.ts` edits need
+  `opencode reload` — the desktop app does not restart its background service.
 - Command names are mixed-case (`/archive_Put`). They are matched literally, so
   `/archive_put` will not autocomplete — the casing is deliberate, not a typo.
 
