@@ -100,15 +100,39 @@ newest-first, and both columns were already selected by the store. **The window
 opens on Last modified**, from `DEFAULT_SORT`; Name is one click away, which is
 the right way round — "what did I work on lately" is what most sessions are
 opened to answer, and "what was it called" is a question you already know the
-answer to. Right-click a row to open its strip:
+answer to. Click a row to open its strip:
 
 | Button | Does |
 |--------|------|
 | Archive / Restore | The primary action; refused on the session you are working in |
+| Stats | Read-only report for that one session |
 | Transcript.md | Full transcript to `~/Downloads/<title>.md` |
 | Export.json | `opencode session export` output to `~/Downloads/<title>.json`, importable |
 | Delete | Removes the session, after a dialog defaulting to Cancel |
 | Close | Nothing at all — backs out of the strip without writing |
+
+### Six Buttons, And Why Not More
+Two of these — **Export.json** and **Delete** — duplicate something OpenCode's
+own session menu already offers. Both were kept deliberately, for reasons that
+are about the *user's* path rather than the feature set:
+
+- **Export.json** is how a session moves to another laptop. The button hands
+  the id to `opencode session export`, which is the same exporter the built-in
+  uses — so this is not a second implementation, it is an unreachable one made
+  reachable. And with `Copy id` gone, the terminal route means reading the id
+  off the screen by eye.
+- **Delete** is here rather than in another menu because finding it is the
+  cost, not the capability.
+
+**Duplicating more of OpenCode's menu would be wasted effort.** Neither of those
+is reachable from a plugin — `command.session.export` is absent from
+`/api/command` and from the `tui.command.execute` enum, exactly as fork is —
+and rebuilding the rest of that menu one button at a time is how this window
+becomes a worse copy of something that already exists.
+
+`Copy id` was the counter-example: it duplicated *nothing*, it sat there from
+the popup's first commit, and nobody had asked for it. The test now asserts its
+absence so it cannot come back as "while we're here".
 
 **Two view controls sit above the list: three sort buttons and a search box.**
 `Name` / `Start date` / `Last modified` are radio buttons in one group, and the
