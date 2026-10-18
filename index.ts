@@ -348,26 +348,38 @@ function menu(
  * repeated on every row, since a row is only ever in one section.
  */
 /**
- * Order session rows by title, the way both listings now present them.
+ * Order session rows by when they were last touched, newest first.
  *
- * Case-insensitive, so "apple" and "Banana" file under one alphabet rather than
- * two. Untitled sessions sort last: an empty title would otherwise beat every
- * real one and put the least identifiable rows at the top. `id` breaks the last
- * tie, because titles repeat and a list that reshuffles itself on every write is
- * unreadable while you are reaching for a row in it.
+ * This is the order the popup window opens in (`DEFAULT_SORT` there is "updated"
+ * too), and the order `SessionStore.list()` already returns. The two listings
+ * used to disagree: `inventory()` sorted alphabetically and the window did not,
+ * so the same command showed its sessions in a different order depending on
+ * whether you got the window or the text.
+ *
+ * Alphabetical was the wrong default for the same reason it was wrong in the
+ * window. "What did I work on lately" is what most sessions are opened to
+ * answer; "what was it called" is a question you already know the answer to,
+ * and the window can answer it with one click.
+ *
+ * Rows with no timestamp sort last rather than first: an absent value is
+ * nothing to order by, so it goes where it is visible rather than where it
+ * wins. `id` breaks the last tie, because two sessions can share a timestamp
+ * and a list that reshuffles itself between refreshes is unreadable while you
+ * are reaching for a row in it.
  *
  * This is display order only. `SessionStore.list()` still returns
  * `time_updated DESC`, which is what OpenCode itself uses and what restoring
- * depends on to resurface an archived session.
+ * depends on to resurface an archived session — so this matches the store
+ * rather than overriding it.
  */
-function byName(rows: SessionRow[]): SessionRow[] {
+function byRecency(rows: SessionRow[]): SessionRow[] {
   return [...rows].sort((a, b) => {
-    const at = (a.title ?? "").trim()
-    const bt = (b.title ?? "").trim()
-    if (at === "" && bt !== "") return 1
-    if (bt === "" && at !== "") return -1
-    const byText = at.toLowerCase().localeCompare(bt.toLowerCase())
-    return byText !== 0 ? byText : a.id.localeCompare(b.id)
+    const at = a.updated ?? 0
+    const bt = b.updated ?? 0
+    if (at === 0 && bt !== 0) return 1
+    if (bt === 0 && at !== 0) return -1
+    if (at !== bt) return bt - at
+    return a.id.localeCompare(b.id)
   })
 }
 
@@ -392,10 +404,10 @@ function inventoryRow(r: SessionRow): string {
  * and had no way to use. Copying an id is unambiguous, where a remembered number
  * would not be.
  *
- * Rows are sorted by title within each section, matching the popup window.
- * `SessionStore.list()` returns most-recent-first, which is right for
- * OpenCode but made the window's order jump about under the pointer; a list
- * sorted by name stays where you put it.
+ * Rows are ordered newest-first within each section, which is both what
+ * `SessionStore.list()` returns and what the popup window opens in. The window
+ * can switch to Name with a click; a text listing cannot, so recency is the
+ * only order worth defaulting to.
  *
  * The two sections are ordered unarchived-then-archived because that is also
  * the order the popup window groups them in, and because the state decides the
@@ -409,8 +421,8 @@ function inventoryRow(r: SessionRow): string {
 function inventory(all: SessionRow[], limit = 60): string {
   if (all.length === 0) return "No sessions found."
 
-  const working = byName(all.filter((r) => !r.archived))
-  const archived = byName(all.filter((r) => r.archived))
+  const working = byRecency(all.filter((r) => !r.archived))
+  const archived = byRecency(all.filter((r) => r.archived))
 
   const block = (heading: string, rows: SessionRow[]) => {
     if (rows.length === 0) return [`**${heading}**`, "", "_none_"]

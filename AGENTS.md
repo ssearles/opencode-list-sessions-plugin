@@ -147,14 +147,21 @@ because "the session I want to revisit" is archived as often as not.
 - Neither control is remembered between launches: the window opens on
   `DEFAULT_SORT` (last modified) with an empty box. State on disk for two
   preferences is more machinery than the two preferences are worth.
-- **`DEFAULT_SORT` is read by the window *and* by `plain_text()`, not by
-  `inventory()`.** The first two are the popup and must agree, so they share
-  the constant and `test-popup-gui.py` checks `--copy` against the window's own
-  order. `/list_sessions --text` is `inventory()` in index.ts, which stays
-  alphabetical by a separate decision with its own test
-  (`menu.test.ts`, "sorts rows by title within each section"). **So `--text` and
-  the window deliberately disagree on order.** That is a live inconsistency, not
-  an oversight — flip `inventory()` and that test together if it is not wanted.
+- **`DEFAULT_SORT` is read by the window *and* by `plain_text()`, which are the
+  same program.** `test-popup-gui.py` checks `--copy` against the window's own
+  order, so the two cannot drift.
+- **`/list_sessions --text` matches the window's order, and is a separate copy
+  of the rule.** It is `inventory()` / `byRecency()` in index.ts, TypeScript,
+  and the popup is Python — so there is no constant to share, the same way
+  `windowCommand()` is duplicated across the two repos rather than imported.
+  The two are held together by tests instead: `menu.test.ts` asserts recency
+  in both sections, and asserts the rows are **not** alphabetical.
+- **`menu.test.ts`'s shared fixture cannot catch a name sort.** Its unarchived
+  pair is Alpha 5000 / Beta 4000, which is alphabetical *and* newest-first at
+  once, so a listing sorted by title passed that test unchanged. The fixture is
+  left alone and the discriminating rows are hand-built in
+  "does not fall back to alphabetical order". Worth remembering before trusting
+  that fixture to prove anything about order.
 
 **Transcript.md extracts images.** A pasted screenshot is ~200KB of base64 PNG
 stored inline in the message's `files` list — not in a `part` row — so a reader
@@ -270,7 +277,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 |------|-------|--------|
 | `test/db.test.ts` | 38 | Shared suite run twice (v1 + v2 schemas), discovery |
 | `test/unarchive.test.ts` | 12 | Sync resolver — the `rows` form of `__resolve` |
-| `test/menu.test.ts` | 24 | Numbered menus, prompt parsing, inventory rendering, picking by number |
+| `test/menu.test.ts` | 27 | Numbered menus, prompt parsing, inventory rendering, picking by number |
 | `test/markdown.test.ts` | 13 | `messageText`, `slug`, `toMarkdown` |
 | `test/resolve.test.ts` | 9 | Store-backed resolver — the async form of `__resolve` |
 | `test/namespacing.test.ts` | 5 | Guards tool namespacing / core-tool collisions |

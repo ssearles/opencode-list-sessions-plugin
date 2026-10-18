@@ -137,9 +137,11 @@ describe("prompt text parsing", () => {
 })
 
 describe("/list inventory", () => {
-  it("sorts rows by title within each section", async () => {
-    // The store returns time_updated DESC. Both listings now sort by name, so
-    // the order the reader sees does not move when a session is written to.
+  it("orders rows newest-first within each section, like the window", async () => {
+    // The store returns time_updated DESC and the popup window opens in the
+    // same order, so this listing does too. It used to sort alphabetically,
+    // which meant the same command listed its sessions in a different order
+    // depending on whether you got the window or the text.
     const out = __inventory(await rows())
     const [working, archived] = out.split("**Archived")
     // Title lines are indented by exactly two spaces; the id line under each
@@ -150,9 +152,61 @@ describe("/list inventory", () => {
     for (const [name, block] of [["Unarchived", working], ["Archived", archived]] as const) {
       const got = titles(block)
       assert.ok(got.length > 1, `${name} needs at least two rows to test order`)
-      const sorted = [...got].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
-      assert.deepEqual(got, sorted, `${name} section must be alphabetical by title`)
+      // Expected straight from the store's own order, filtered to this section.
+      const all = await rows()
+      const want = all
+        .filter((r) => (name === "Archived" ? r.archived : !r.archived))
+        .map((r) => r.title)
+      assert.deepEqual(got, want, `${name} section must be newest-first`)
     }
+  })
+
+  it("does not fall back to alphabetical order", () => {
+    // Hand-built rows, because the shared fixture cannot catch a regression
+    // here: its unarchived pair (Alpha 5000, Beta 4000) is alphabetical AND
+    // newest-first at the same time, so a listing that sorted by name would
+    // pass that test unchanged. These rows disagree in both sections, so
+    // recency and alphabetical are different answers everywhere.
+    const crafted = [
+      { id: "s1", title: "Alpha", directory: "", created: 1, updated: 1000, archived: null, messages: 1 },
+      { id: "s2", title: "Zulu", directory: "", created: 1, updated: 3000, archived: null, messages: 1 },
+      { id: "s3", title: "Delta", directory: "", created: 1, updated: 7000, archived: 9, messages: 1 },
+      { id: "s4", title: "Gamma", directory: "", created: 1, updated: 9000, archived: 9, messages: 1 },
+    ]
+    const out = __inventory(crafted)
+    const [working, archived] = out.split("**Archived")
+    const titles = (block: string) =>
+      [...block.matchAll(/^ {2}[^ ].*$/gm)].map((m) => m[0].trim())
+
+    assert.deepEqual(titles(working), ["Zulu", "Alpha"], "newest unarchived first")
+    assert.deepEqual(titles(archived), ["Gamma", "Delta"], "newest archived first")
+
+    // And spelled out, so a future alphabetical sort fails with a message that
+    // says which rule it broke rather than two lists that differ.
+    for (const [name, got] of [["Unarchived", titles(working)], ["Archived", titles(archived)]] as const) {
+      const alphabetical = [...got].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+      assert.notDeepEqual(got, alphabetical, `${name} rows happen to be alphabetical, so this cannot catch a name sort`)
+    }
+  })
+
+  it("puts a session with no timestamp last rather than first", () => {
+    const crafted = [
+      { id: "s1", title: "Alpha", directory: "", created: null, updated: null, archived: null, messages: 1 },
+      { id: "s2", title: "Zulu", directory: "", created: 1, updated: 3000, archived: null, messages: 1 },
+    ]
+    const titles = (out: string) =>
+      [...out.matchAll(/^ {2}[^ ].*$/gm)].map((m) => m[0].trim())
+    assert.deepEqual(titles(__inventory(crafted)), ["Zulu", "Alpha"], "a missing timestamp must not win")
+  })
+
+  it("breaks a timestamp tie by id so the order is stable", () => {
+    const crafted = [
+      { id: "s_z", title: "Zulu", directory: "", created: 1, updated: 5000, archived: null, messages: 1 },
+      { id: "s_a", title: "Alpha", directory: "", created: 1, updated: 5000, archived: null, messages: 1 },
+    ]
+    const titles = (out: string) =>
+      [...out.matchAll(/^ {2}[^ ].*$/gm)].map((m) => m[0].trim())
+    assert.deepEqual(titles(__inventory(crafted)), ["Alpha", "Zulu"], "ties go to the lower id")
   })
 
   it("puts unarchived sessions before archived ones", async () => {
