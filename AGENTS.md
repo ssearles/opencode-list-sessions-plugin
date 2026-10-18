@@ -21,7 +21,7 @@ popup window ships alongside them rather than instead of them.
 
 ## Key Commands
 ```bash
-npm test          # node --test test/ (151) + the five popup suites (332 checks)
+npm test          # node --test test/ (152) + the five popup suites (370 checks)
 npm run test:plugin   # the TypeScript suite alone
 npm run test:popup    # the popup suites alone (needs WAYLAND_DISPLAY)
 npm run install:popup # symlink ~/.local/bin/session-list-popup at the repo copy
@@ -303,7 +303,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 6 | Many sessions stay reachable; the scrollbar is real |
-| `popup/test-popup-stats.py` | 122 | Per-session and whole-store figures, section folding, the Copy path, the environment probe, USB ports |
+| `popup/test-popup-stats.py` | 160 | Per-session and whole-store figures, section folding, the Copy path, the environment probe, machine and CPU identity, USB ports |
 | `popup/test-info-window.py` | 16 | Text sizing, the size preference, its fallbacks |
 | `popup/test-info-save.py` | 23 | Save naming, timestamp collisions, markdown vs text output |
 | `popup/test-copy-gesture.py` | 8 | Select-then-Ctrl+C survives the window closing |
@@ -550,6 +550,45 @@ is this one, and was why a mutant returning a hardcoded `2.0.24` survived.
 `_file_version()` was inline in `environment_stats()` until the mutation run
 forced the extraction; that is the only reason it exists.
 
+### The Machine Is Identified, Not Fingerprinted
+`machine` and `cpu` sit at the top of the footer report. Both are here because
+they answer "why is this slow on *this* laptop", which is a question the
+per-session figures cannot.
+
+**`os.cpu_count()` was overstating the machine by half.** It returns *logical*
+processors, so this 2-core chip with hyperthreading printed "4 cpus" and read
+as a quad-core. Physical cores come from the distinct `(physical id, core id)`
+pairs in `/proc/cpuinfo`. The line now reads:
+
+```
+  cpu                    Intel(R) Pentium(R) CPU 4405U @ 2.10GHz
+                         2 cores / 4 threads   2.10 GHz   cache 2048 KB
+```
+
+The model name leads because it is what sets expectations — a 2.1GHz Pentium
+4405U is a 2015 low-power laptop part, and no core count tells an agent
+estimating a build's duration that.
+
+`/proc/cpuinfo`, not `lscpu`. `lscpu` is installed here and is the tidier
+answer, but forking it on a button click is the cost the `opencode --version`
+probe already declines to pay. The model label is probed across `model name` /
+`Hardware` / `Model` so ARM gets whatever it has rather than a blank.
+
+**The marketing name is in `product_version`, not `product_name`.** This
+machine reports `product_name = 80SA` (the type number) and
+`product_version = Lenovo ideapad FLEX 4-1470`. Taking the first field would
+put a bare code where the model belongs. Vendors split these differently, so
+`_looks_like_model()` prefers whichever value contains a space.
+
+**Serial and UUID are deliberately not read**, and a test asserts those three
+field names appear nowhere in the source. They identify *this* machine rather
+than describe it, this report can be copied out of the window, and no one
+debugging a slow build needs them.
+
+Chassis type is mapped to SMBIOS names because it is how a script learns "this
+is a laptop" without asking — a 2-core part in a notebook thermally throttles
+differently than the same part in a desktop.
+
 ### USB Ports, Because Slow I/O Looks Like A Hung Agent
 Not an OpenCode stat — and worth saying so. It is the answer to "why is this
 file slow", which arrives wearing the same clothes as "OpenCode is hanging": a
@@ -595,8 +634,30 @@ were **tautological or machine-local**:
 - a locale check run against the live environment only proves it is true *here*.
   Now patched to `LANG=C`, `LC_ALL=C`, unset, and UTF-8 in turn.
 
+The machine/CPU probe added four more, and they are the most interesting ones
+because **three of the four passed against code that was outright wrong**:
+
+- the placeholder loop compared junk strings against this machine's vendor
+  name, so it passed whatever `DMI_PLACEHOLDERS` did. Every DMI field here is
+  genuinely populated, which is exactly why the live values cannot test a rule
+  about unpopulated ones.
+- `not chassis.startswith("type ")` passes for a raw `"10"`. It now asserts the
+  value is a *known* name.
+- nothing asserted the clock speed was read at all.
+- the serial/uuid check could never fail, because those files are root-only
+  here — so the mutant that collects one collected `""`.
+
+That last one only works because there is also a **structural** check: the
+field names must not appear in the source at all. When a value is unreadable
+on this machine, a behavioural test has nothing to compare.
+
 **A check whose expectation is computed from the thing under test is empty, and
 empty is always true.** That is the one pattern to look for first.
+
+**When the machine's own values cannot test the rule, extract the rule.** Same
+reason as `_file_version` and `_utf8_locale`: `_dmi_value()` exists because
+"is `To Be Filled By O.E.M.` treated as absent?" is unanswerable on a laptop
+whose vendor field says `LENOVO`.
 
 And **a crash counts as caught.** Grepping stdout for `FAIL` alone reported a
 suite that died with a traceback as a mutation surviving — which is why the

@@ -423,12 +423,147 @@ check("memory is in MB and plausible",
       0 < env.get("mem_total", 0) < 10_000_000, str(env.get("mem_total")))
 check("the schema is the one the store is reading", env["schema"] == store.table)
 
+print("\nthe machine is identified, without being fingerprinted")
+mach = pop._machine_info()
+dmi = Path("/sys/class/dmi/id")
+if dmi.is_dir():
+    def _dmi(field):
+        try:
+            return (dmi / field).read_text().strip()
+        except OSError:
+            return ""
+    check("the vendor is read from dmi", bool(mach.get("vendor")),
+          str(mach.get("vendor")))
+    check("the model is the name a person would use, not the type code",
+          bool(mach.get("model")) and " " in mach["model"],
+          str(mach.get("model")))
+    check("and it matches what dmi actually reports, one of the two fields",
+          mach.get("model") in (_dmi("product_version"), _dmi("product_name")),
+          f"{mach.get('model')} vs {_dmi('product_name')!r} / {_dmi('product_version')!r}")
+    check("the type code is kept separately rather than shown as the model",
+          not mach.get("type") or mach.get("model") != mach["type"])
+    # Placeholders, tested against the filter itself. Comparing a junk string
+    # against this machine's vendor name passes whatever the filter does --
+    # every DMI field here is genuinely populated.
+    for junk in ("To Be Filled By O.E.M.", "Default string", "None",
+                 "Unknown", "Not Applicable", "N/A", "System Serial Number",
+                 "OEM", "  LENOVO  "):
+        check(f"{junk!r} is {'kept' if junk.strip().lower() == 'lenovo' else 'treated as absent'}",
+              pop._dmi_value(junk) == ("LENOVO" if junk.strip().lower() == "lenovo" else ""),
+              repr(pop._dmi_value(junk)))
+    check("a real value survives the filter", pop._dmi_value("LENOVO") == "LENOVO")
+
+    # The two fields that identify the machine rather than describe it. Both
+    # are root-only here, so this compares only when the file is readable --
+    # `"" in str(...)` is always true, which is what made the first version of
+    # this check fail against correct code.
+    for field, label in (("product_serial", "serial number"),
+                         ("product_uuid", "uuid")):
+        value = _dmi(field)
+        check(f"the {label} is not collected",
+              not any(label.split()[0] in k.lower() for k in mach)
+              and (value == "" or value not in str(mach.values())),
+              f"dmi readable: {bool(value)}")
+
+    # Structural, because on this machine those files are unreadable and the
+    # check above cannot fail however the code reads them.
+    _src = Path(pop.__file__).read_text()
+    for field in ("product_serial", "product_uuid", "board_serial"):
+        check(f"{field} is never read at all",
+              f'field("{field}")' not in _src and f'"{field}"' not in _src)
+
+    if mach.get("chassis"):
+        check("the chassis is a known name, not a raw smbios number",
+              mach["chassis"] in set(pop.CHASSIS_TYPES.values()),
+              mach["chassis"])
+        check("a laptop is recognisable as one",
+              mach["chassis"] in {"laptop", "notebook", "portable",
+                                  "convertible", "detachable", "sub notebook"},
+              mach["chassis"])
+else:
+    print("  skip  /sys/class/dmi/id not present")
+
+check("a machine with no dmi is reported as empty, not as a crash",
+      isinstance(pop._machine_info(), dict))
+
+print("\nthe cpu is named, and its real core count is not overstated")
+cpu = pop._cpu_info()
+check("the logical processor count is reported", isinstance(cpu.get("logical"), int)
+      and cpu["logical"] > 0, str(cpu.get("logical")))
+check("the model name is read from cpuinfo",
+      bool(cpu.get("model")) or bool(cpu.get("arch")),
+      str(cpu.get("model") or cpu.get("arch")))
+
+# Physical cores worked out from /proc/cpuinfo independently, because the
+# whole point is that os.cpu_count() CANNOT be trusted for this -- it returns
+# logical processors and the report used to print that as "4 cpus" on a chip
+# with two.
+try:
+    _txt = Path("/proc/cpuinfo").read_text()
+    _pairs = set()
+    for _block in _txt.split("\n\n"):
+        _d = {}
+        for _line in _block.splitlines():
+            if ":" in _line:
+                _k, _v = _line.split(":", 1)
+                _d[_k.strip()] = _v.strip()
+        if "core id" in _d and "physical id" in _d:
+            _pairs.add((_d["physical id"], _d["core id"]))
+    if _pairs:
+        check("physical cores are counted, not assumed from the thread count",
+              cpu.get("cores") == len(_pairs),
+              f"report {cpu.get('cores')} vs cpuinfo {len(_pairs)}")
+        check("and cores never exceed the logical count they came from",
+              cpu["cores"] <= cpu["logical"], f"{cpu['cores']} / {cpu['logical']}")
+except OSError:
+    print("  skip  /proc/cpuinfo not readable")
+
+# The summary must not overstate. On a hyperthreaded part the two differ, and
+# that difference is the entire reason this probe exists.
+summary = pop._cpu_summary(cpu)
+check("the summary carries the model or the arch", bool(summary.strip()))
+check("the clock speed is read and in a plausible range",
+      isinstance(cpu.get("mhz"), float) and 100 < cpu["mhz"] < 10000,
+      str(cpu.get("mhz")))
+check("and the summary carries it in GHz", "GHz" in summary, summary)
+if cpu.get("cores") and cpu.get("logical") and cpu["cores"] != cpu["logical"]:
+    check("a hyperthreaded cpu says cores and threads, not just a count",
+          f"{cpu['cores']} cores" in summary and f"{cpu['logical']} threads" in summary,
+          summary)
+    check("and does not present the thread count alone as the core count",
+          not summary.startswith(str(cpu["logical"]) + " cores"))
+check("the summary omits the model when asked, for the continuation line",
+      (cpu.get("model") or "") not in pop._cpu_summary(cpu, with_model=False))
+check("an unreadable cpu is reported as such rather than blank",
+      pop._cpu_summary({}) == "not readable")
+check("a one-core machine is not called multi-core",
+      "1 core" in pop._cpu_summary({"logical": 1, "cores": 1}),
+      pop._cpu_summary({"logical": 1, "cores": 1}))
+
 print("\nthe environment section renders, and survives having no store")
 lines = pop._environment_lines(env)
 check("it carries display, versions and memory",
       any("display" in l for l in lines)
       and any("desktop app" in l for l in lines)
       and any("memory" in l for l in lines))
+check("and names the cpu, which the report could not do before",
+      any("cpu" in l for l in lines)
+      and any((env.get("cpu", {}).get("model") or "x86") in l for l in lines),
+      str([l for l in lines if "cpu" in l]))
+check("and the rendered cpu line is not the bare thread count",
+      not any(l.strip().startswith("cpus / load") and
+              l.split()[2:3] == [str(os.cpu_count())] for l in lines))
+_mach = env.get("machine") or {}
+if _mach.get("model"):
+    check("and names the machine, with the model and not just the vendor",
+          any(_mach["model"] in l for l in lines),
+          str([l for l in lines if "machine" in l]))
+    check("and does not show the type code in place of the model",
+          not any(l.split("machine", 1)[-1].strip().endswith(_mach.get("type", ""))
+                  for l in lines if "machine" in l and _mach.get("type")))
+else:
+    check("a machine with no dmi still renders, just without the line",
+          True)
 check("the report has an ENVIRONMENT section",
       "ENVIRONMENT" in dict(pop.database_sections(d, store)))
 check("and says so when there is no store to describe",

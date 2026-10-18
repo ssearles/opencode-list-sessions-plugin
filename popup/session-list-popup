@@ -1306,6 +1306,212 @@ def _meminfo() -> dict:
     return out
 
 
+def _cpu_info() -> dict:
+    """
+    What the CPU actually is, and how much of it there really is.
+
+    `os.cpu_count()` returns **logical** processors, so a 2-core chip with
+    hyperthreading reports 4 and the report says "4 cpus". That is the number
+    that matters least: parallel work gets two cores' throughput, not four, and
+    on a low-power laptop part the gap between "4" and "2 real cores at 2GHz"
+    is most of why a heavy task feels slow here. Both counts, and the model
+    name, because the model is the one that tells you what to expect.
+
+    `/proc/cpuinfo` rather than `lscpu`: `lscpu` is installed here and is the
+    tidier answer, but forking it on a button click is the same cost as the
+    `opencode --version` probe this deliberately does not do. cpuinfo needs no
+    dependency and no fork, and its field names are stable across every
+    architecture that has them.
+
+    ARM does not call it `model name`, so the label is probed in order and the
+    machine gets whatever it has rather than a blank.
+    """
+    out: dict = {"logical": os.cpu_count()}
+    try:
+        text = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return out
+
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    fields = []
+    for block in blocks:
+        parsed = {}
+        for line in block.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                parsed[key.strip()] = value.strip()
+        fields.append(parsed)
+
+    # Model name on x86; ARM says `Hardware`, and some boards say `Model`.
+    for key in ("model name", "Hardware", "Model", "cpu model"):
+        for parsed in fields:
+            if parsed.get(key):
+                out["model"] = parsed[key]
+                break
+        if "model" in out:
+            break
+
+    # Physical cores from the (package, core) pairs, which is what `cpu cores`
+    # reports and what `cpu_count()` does not. Absent on some ARM boards, in
+    # which case the logical count stands and is not second-guessed.
+    pairs = {(p["physical id"], p["core id"]) for p in fields
+             if "core id" in p and "physical id" in p}
+    if pairs:
+        out["cores"] = len(pairs)
+
+    speeds = {p["cpu MHz"] for p in fields if "cpu MHz" in p}
+    if speeds:
+        out["mhz"] = max(float(s) for s in speeds)
+    caches = {p["cache size"] for p in fields if "cache size" in p}
+    if caches:
+        out["cache"] = sorted(caches)[0]
+
+    out["arch"] = os.uname().machine
+    return out
+
+
+# Vendors ship placeholder values in fields they never populated, and those
+# are worse than absent because they read as an answer.
+DMI_PLACEHOLDERS = {
+    "to be filled by o.e.m.", "to be filled by oem", "to be filled by oem.",
+    "default string", "none", "unknown", "not applicable", "n/a",
+    "system serial number", "system manufacturer", "system product name",
+    "system version", "defaulted", "oem", "o.e.m.",
+}
+
+
+def _dmi_value(value: str) -> str:
+    """
+    A DMI string field, or "" when the vendor left a placeholder in it.
+
+    Its own function for the same reason `_file_version` is: the placeholder
+    rule can only be tested against fixtures if it can be called on something
+    other than this machine, whose DMI fields are all genuinely populated --
+    so a test that reads the live ones passes against code that accepts
+    "To Be Filled By O.E.M." as a vendor.
+    """
+    value = value.strip()
+    return "" if value.lower() in DMI_PLACEHOLDERS else value
+
+
+def _machine_info() -> dict:
+    """
+    The machine itself: make, model, and whether it is a laptop.
+
+    DMI, from sysfs, no dependency and no fork. `hostnamectl` would be tidier
+    and `upower` would give a warranty-expiry date, but both are daemons or
+    D-Bus clients on a button click.
+
+    **Serial and UUID are deliberately not read.** They are the two DMI fields
+    that identify *this* machine rather than describing it, this window's
+    report can be copied out of it, and a serial number is the one figure here
+    that nobody troubleshooting a slow build needs.
+
+    Vendors ship placeholder values in fields they never populated —
+    "To Be Filled By O.E.M.", "Default string", "None", "Unknown" — and those
+    are worse than absent because they read as an answer.
+
+    The marketing name is in `product_version`, not `product_name`: this
+    machine reports `product_name = 80SA` (the type number) and
+    `product_version = Lenovo ideapad FLEX 4-1470`. Taking the first would put
+    a bare code where the model should be.
+    """
+    root = Path("/sys/class/dmi/id")
+    if not root.is_dir():
+        return {}
+
+    def field(name: str) -> str:
+        try:
+            return _dmi_value((root / name).read_text())
+        except OSError:
+            return ""
+
+    out: dict = {}
+    vendor = field("sys_vendor")
+    # product_version is the marketing name on Lenovo; on Dell and HP the
+    # human-readable one is product_name, and on others both are codes. Prefer
+    # whichever looks like a name rather than a type number.
+    version, name = field("product_version"), field("product_name")
+    model = version if _looks_like_model(version, name) else name
+    if vendor:
+        out["vendor"] = vendor
+    if model:
+        out["model"] = model
+    if name and name != model:
+        out["type"] = name
+    board = field("board_name")
+    if board and board != model:
+        out["board"] = board
+    bios = field("bios_version")
+    if bios:
+        out["bios"] = bios
+    chassis = field("chassis_type")
+    if chassis:
+        out["chassis"] = CHASSIS_TYPES.get(chassis, f"type {chassis}")
+    return out
+
+
+# SMBIOS chassis type, which is how a script learns "this is a laptop" without
+# asking. The number is stable; the name is from the SMBIOS spec.
+CHASSIS_TYPES = {
+    "3": "desktop", "4": "low-profile desktop", "5": "pizza box",
+    "6": "mini tower", "7": "tower", "8": "portable",
+    "9": "laptop", "10": "notebook", "11": "hand held",
+    "13": "all in one", "14": "sub notebook", "30": "tablet",
+    "31": "convertible", "32": "detachable",
+}
+
+
+def _looks_like_model(version: str, name: str) -> bool:
+    """
+    Whether product_version reads like a model rather than a type number.
+
+    Vendors split the fields differently and the codes are short and
+    alphanumeric: `80SA` is a Lenovo type number, `ideapad FLEX 4-1470` is
+    the model a person would recognise. A short code with no spaces in either
+    field means neither is a name.
+    """
+    if version and " " in version:
+        return True
+    if name and " " in name:
+        return False
+    return False
+
+
+def _cpu_summary(cpu: dict, with_model: bool = True) -> str:
+    """
+    One line: what it is, and how much of it there really is.
+
+    Both counts, because "4 cpus" on a 2-core part overstates by half and the
+    overstatement is what makes a slow run look inexplicable. The model name
+    leads, because it is the thing that sets expectations — a 2.1GHz Pentium
+    4405U is a 2015 low-power laptop part, and an agent estimating how long a
+    build should take has no way to know that from a core count.
+
+    `with_model=False` for the continuation line, which would otherwise repeat
+    the name directly above it.
+    """
+    bits = []
+    if with_model:
+        if cpu.get("model"):
+            bits.append(cpu["model"])
+        elif cpu.get("arch"):
+            bits.append(cpu["arch"])
+
+    cores, logical = cpu.get("cores"), cpu.get("logical")
+    if cores and logical and cores != logical:
+        bits.append(f"{cores} cores / {logical} threads")
+    elif logical:
+        bits.append(f"{logical} {'core' if logical == 1 else 'cores'}")
+    elif cores:
+        bits.append(f"{cores} cores")
+    if cpu.get("mhz"):
+        bits.append(f"{cpu['mhz'] / 1000:.2f} GHz")
+    if cpu.get("cache"):
+        bits.append(f"cache {cpu['cache']}")
+    return "   ".join(bits) or ("not readable" if with_model else "")
+
+
 def _utf8_locale() -> bool:
     """
     Whether the locale can represent the characters in a session title.
@@ -1368,6 +1574,8 @@ def environment_stats(store: Store) -> dict:
         "locale_utf8": _utf8_locale(),
         "lang": os.environ.get("LANG") or os.environ.get("LC_ALL") or "unset",
         "cpus": os.cpu_count(),
+        "cpu": _cpu_info(),
+        "machine": _machine_info(),
         "load": os.getloadavg() if hasattr(os, "getloadavg") else (0, 0, 0),
     }
 
@@ -1556,7 +1764,24 @@ def session_sections(s: dict) -> list[tuple[str, object]]:
 
 def _environment_lines(env: dict) -> list[str]:
     """The machine, as the lines the report shows."""
-    lines = [
+    lines = []
+    machine = env.get("machine") or {}
+    if machine.get("vendor") or machine.get("model"):
+        detail = machine.get("vendor", "")
+        if machine.get("model"):
+            detail = f"{detail} {machine['model']}".strip()
+        lines.append(f"  {'machine':<22} {detail}")
+        extra = "   ".join(
+            part for part in (
+                machine.get("chassis"),
+                f"type {machine['type']}" if machine.get("type") else "",
+                f"bios {machine['bios']}" if machine.get("bios") else "",
+            ) if part)
+        if extra:
+            lines.append(f"  {'':<22} {extra}")
+        lines.append("")
+
+    lines += [
         f"  {'display':<22} {env['session_type']}"
         f"   WAYLAND_DISPLAY={env['wayland_display']}"
         f"   DISPLAY={env['display']}",
@@ -1570,9 +1795,14 @@ def _environment_lines(env: dict) -> list[str]:
         f"  {'opencode on PATH':<22} {env['opencode_on_path']}",
         f"  {'database schema':<22} {env['schema']}",
         "",
-        f"  {'cpus / load':<22} {env['cpus']}"
-        f"   load {env['load'][0]:.1f} {env['load'][1]:.1f} {env['load'][2]:.1f}",
+        f"  {'load':<22} {env['load'][0]:.1f} {env['load'][1]:.1f} {env['load'][2]:.1f}",
     ]
+    cpu = env.get("cpu") or {}
+    if cpu.get("model") or cpu.get("cores") or cpu.get("logical"):
+        lines.append(f"  {'cpu':<22} {cpu.get('model') or cpu.get('arch') or 'unknown'}")
+        lines.append(f"  {'':<22} {_cpu_summary(cpu, with_model=False)}")
+    else:
+        lines.append(f"  {'cpu':<22} not readable")
     if env.get("mem_total"):
         lines.append(
             f"  {'memory':<22} {env['mem_total']:,} MB total"
