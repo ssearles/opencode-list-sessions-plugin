@@ -109,6 +109,40 @@ describe("/list_sessions reports are status, not instructions", () => {
     }
   })
 
+  it("describes the sort the window actually opens on", () => {
+    // The report said "sorted by name" for three commits after the default
+    // became newest-first — the same failure DEFAULT_SORT_LABEL's own comment
+    // records, in the same repo, in the sentence that comment warns about.
+    //
+    // Read from the popup rather than repeated here: a second copy of "the
+    // default is newest-first" is a second thing to forget. Python and
+    // TypeScript cannot share a constant, so this is the join.
+    const popup = readFileSync(join(here, "..", "popup", "session-list-popup"), "utf8")
+    const mode = popup.match(/^DEFAULT_SORT = "([a-z]+)"/m)?.[1]
+    assert.ok(mode, "could not read DEFAULT_SORT out of the popup")
+
+    const opened = __popupOpenedNote()
+    // What each mode is called, as the report must call it.
+    const phrases: Record<string, string> = {
+      name: /sorted by name/i,
+      created: /most recently started|newest first|start date/i,
+      updated: /most recently modified|newest first|last modified/i,
+    }
+    assert.match(opened, phrases[mode], `the report does not describe the ${mode} sort`)
+
+    // And names neither of the other two as the order it opens in. The
+    // alternation needs its own group: `a[^.]*x|y` parses as `(a[^.]*x)|(y)`,
+    // so an ungrouped one matches "start date" anywhere in the report — which
+    // is what happened the first time this ran, against a correct sentence.
+    for (const [other, phrase] of Object.entries(phrases)) {
+      if (other === mode) continue
+      assert.ok(
+        !new RegExp(`opens in[^.]*(?:${phrase.source})`, "i").test(opened),
+        `the report claims the window opens in the ${other} sort`,
+      )
+    }
+  })
+
   it("still prints the list when the window failed", () => {
     // The fallback is the reason the failure branch exists at all. A guard that
     // suppressed the inventory would make the message safe and useless.

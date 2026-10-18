@@ -523,7 +523,8 @@ function popupOpenedNote(): string {
       "**Opened the session popup window.**",
       "",
       "It lists every session — unarchived first, then archived, each section " +
-        "sorted by name. The user drives it with the mouse: right-click a row " +
+        "most recently modified first, with Name and Start date one click away. " +
+        "The user drives it with the mouse: right-click a row " +
         "for that session's buttons, Archive or Restore, Transcript.md, " +
         "Export .json, Delete, and Close to back out without writing anything.",
       "",
