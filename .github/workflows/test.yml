@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: .
+          path: repo
       
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
@@ -20,15 +20,19 @@ jobs:
           bun-version: latest
       
       - name: Install dependencies
+        working-directory: repo
         run: bun install
       
       - name: Run plugin tests
+        working-directory: repo
         run: bun run test:plugin
       
       - name: Check module loading
+        working-directory: repo
         run: bun run check
       
       - name: Typecheck
+        working-directory: repo
         run: bun run typecheck
 
   test-popup:
