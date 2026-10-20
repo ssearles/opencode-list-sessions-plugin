@@ -1889,10 +1889,10 @@ def session_sections(s: dict) -> list[tuple[str, object]]:
         ("MESSAGES BY KIND", "\n".join(
             f"  {kind:<12} {count:,}" for kind, count in
             sorted(s["kinds"].items(), key=lambda kv: -kv[1]))),
-        ("TOOLS", "\n".join(_counter_rows(s["tools"]))),
+        ("TOOLS (calls)", "\n".join(_counter_rows(s["tools"]))),
         ("FILES TOUCHED", group_by_directory(s["files"])),
-        ("MODELS", "\n".join(_counter_rows(s["models"]))),
-        ("PROVIDERS", "\n".join(_counter_rows(s.get("providers", {})))),
+        ("MODELS (messages)", "\n".join(_counter_rows(s["models"]))),
+        ("PROVIDERS (messages)", "\n".join(_counter_rows(s.get("providers", {})))),
         ("SESSION", "\n".join(tail)),
     ]
 
@@ -2044,10 +2044,10 @@ def database_sections(d: dict, store: "Store | None" = None) -> list[tuple[str, 
             f"  {tok['cache_read']:>12,}   read from cache",
         ])),
         ("LARGEST SESSIONS", "\n".join(largest)),
-        ("TOOLS, ALL SESSIONS", "\n".join(_counter_rows(d["tools"], 14))),
+        ("TOOLS, ALL SESSIONS (calls)", "\n".join(_counter_rows(d["tools"], 14))),
         ("MOST TOUCHED FILES", group_by_directory(d["files"])),
-        ("MODELS", "\n".join(_counter_rows(d["models"]))),
-        ("PROVIDERS", "\n".join(_counter_rows(d.get("providers", {})))),
+        ("MODELS (messages)", "\n".join(_counter_rows(d["models"]))),
+        ("PROVIDERS (messages)", "\n".join(_counter_rows(d.get("providers", {})))),
         ("MESSAGES BY KIND", "\n".join(
             f"  {kind:<12} {count:,}" for kind, count in
             sorted(d["kinds"].items(), key=lambda kv: -kv[1]))),
@@ -2929,20 +2929,20 @@ class Window(Gtk.Window):
 
     def _show_architecture(self) -> None:
         """
-        Open a window with the architecture diagram image.
+        Open a window with the architecture diagram from markdown.
         
         Shows how OpenCode fits together on this machine: Hyprland, the desktop
         app, the Rust server, the plugin host, the Python GTK windows, the
         SQLite database, and the LLM provider. Read-only, nothing writes.
         """
-        # Path to the rendered architecture diagram image
-        arch_image = Path(__file__).resolve().parent.parent.parent / "opencode-arch-flow.png"
+        # Path to the cleaned up architecture markdown file
+        arch_md = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
         
-        if arch_image.exists():
-            # Launch info-window with the architecture diagram image
+        if arch_md.exists():
+            # Launch info-window with the markdown file (renders ASCII diagram properly)
             import subprocess
             subprocess.Popen(
-                ["setsid", "info-window", "--title", "OpenCode Architecture", str(arch_image)],
+                ["setsid", "info-window", "--title", "OpenCode Architecture", "--format", "markdown", str(arch_md)],
                 start_new_session=True
             )
         else:
