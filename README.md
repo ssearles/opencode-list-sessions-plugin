@@ -1,30 +1,49 @@
-# opencode-list-sessions
+# opencode-list-sessions-plugin
 
-Added /list_sessions to opencode plugin menu. When /list_sessions is entered a popup window appears which allows
-sessions to be hovered over and with a mouse Left-click  allows for the selected sessions to be  (Archived), (Restored), (Deleted) , (Exported to .json), (Transcribed to .md), (Statistics) shown forthe session being displayed and finally (Close) which exits back to the /list_session popup 
-
-Additionally a set of buttons titled Reset,A+,A-,Architechture,and Database at the bottom of the inital popup window will allow for window text size to be (Reset) to initial configuration,(A+) expanded,(A-) contracted, (Architecure) which shows a diagram of opencode system, (Database) shows overall opencode statistics including laptop working environment and files the opecode has touched on the local laptop, and finally (Close) which exits the inital popup window back to the current default agent session the user is intrereacting with.
+Archive, list, read and restore OpenCode sessions — including sessions
+OpenCode itself can no longer bring back.
 
 Forked from
 [`opencode-session-transcript`](https://github.com/ssearles/opencode-session-transcript),
+and renamed to **opencode-list-sessions-plugin**.
 which had dropped archiving when it pivoted to Markdown export. That work is
 restored here, and a session window ships alongside it rather than instead of it.
 
 ## Why this exists
 
-Clicking On the 3-Squares Icon in the top left corner of the working opencode session presents the user with the working opencodse sessions. Right clicking a session which is not the default session presents the user with options to (Rename),(Delete), or (Export). There is NO archive option presented to the user for the session. The archive option field is available in the sqllite database for these non-default sessions. There is also currently no way of outputing  a chat session as a markdown file of the working session. The export option only produces a json file for the session.
+**Archiving is one-way.** OpenCode's API ignores `time_archived` changes, so an
+archived session cannot be restored through it. This plugin writes directly to
+SQLite, and is the only way back.
 
-Clutter:
-With the user needing to start different sessions for different tasks this 3-square icon menu becomes very CLUTTERED.
-
-**Archiving is one-way.** to UN-CLUTTER these old sessions so the user can easily select sessions that are pertainent to his tasks.
-
-This plugin writes directly to SQLite to ARCHIVE old opencodse sessions and also gives the user a RESTORE mechanism if the user wants to re-start the opencode chat session.
-
-This plugin also provides session statistics and system overall statistics for the opencode database laptop installation. It also provides an overview diagram  of the opencode architecure inside the popup window via an (ARCHITECURE) button.
-
-The AI chatbot discovered that **Export truncates.** The TUI `/export` writes only the messages currently loaded
+**Export truncates.** The TUI `/export` writes only the messages currently loaded
 in the window
+([#50732](https://github.com/anomalyco/opencode/issues/50732),
+[#50014](https://github.com/anomalyco/opencode/issues/50014)) — nothing warns you,
+so the file looks complete. The window's **Transcript.md** button reads every
+message for the session straight out of SQLite, and also writes out any
+screenshots pasted into the conversation.
+
+> **Not a backup.** `/export` writes JSON, which `opencode import` can read back.
+> Markdown cannot be re-imported, and it drops assistant reasoning to do it. If
+> you want a restorable archive, keep using `/export`, or the window's
+> **Export.json** button, which produces the same importable format.
+
+### The 3-squares icon menu
+
+Clicking the 3-squares icon in the top-left corner shows working sessions.
+Right-clicking a non-default session offers **Rename**, **Delete**, **Export** —
+but **no Archive option**. The archive flag exists in SQLite for these sessions
+but the UI doesn't expose it.
+
+**Clutter:** With multiple sessions for different tasks, the 3-squares menu
+becomes cluttered. This plugin un-clutters it by archiving old sessions via
+SQLite and providing a restore mechanism if the user wants to resume a session.
+
+This plugin also provides session statistics and overall database statistics,
+plus an architecture diagram via the **Architecture** button in the popup window.
+
+The AI chatbot discovered that **Export truncates.** The TUI `/export` writes only
+the messages currently loaded in the window
 ([#50732](https://github.com/anomalyco/opencode/issues/50732),
 [#50014](https://github.com/anomalyco/opencode/issues/50014)) — nothing warns you,
 so the file looks complete. The window's **Transcript.md** button reads every
@@ -44,7 +63,7 @@ a checkout instead:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/absolute/path/to/opencode-archive-session"]
+  "plugin": ["/absolute/path/to/opencode-list-sessions-plugin"]
 }
 ```
 
@@ -115,7 +134,7 @@ usb ports, at the speed they actually negotiated:
   2-2     5,000 Mbps  USB 3.0 / 3.2 Gen1  USB 3.2.1 FD  →  sdb1 at /run/media/...
 ```
 
-Two figures there are worth knowing are honest: **core count is physical, not
+Two figures there are worth knowing are precise: **core count is physical, not
 logical** (`os.cpu_count()` returns hyperthreads and would report this 2-core
 chip as 4), and **USB speed is what the port negotiated**, not what the device
 advertises. A drive on a 480 Mbps port is a dozen times slower than the same
@@ -135,7 +154,7 @@ indistinguishable.
 
 It used to. Two write commands printed numbered menus — `/archive_Put` over
 working sessions, `/archive_Pull` over archived — and `/list_sessions` stayed
-unnumbered because a single shared numbering would match neither menu once
+unnumbered because a single numbering would match neither menu once
 either group changed size.
 
 **Both commands are gone.** Archiving, restoring, deleting, transcripts and JSON
@@ -158,7 +177,7 @@ a nearby one.
 ### Transcripts
 
 `/save` is gone — the popup window's **Transcript.md** button does it, and does
-it better. It writes `~/Downloads/<session title>.md` and decodes the ~200KB
+it better. It writes `~/Downloads/<session title>.md` and decodes the ~200 KB
 base64 blobs of pasted screenshots into real PNGs beside the file, which
 `/save` never did. `OPENCODE_TRANSCRIPT_DIR` went with the command.
 
@@ -188,7 +207,7 @@ Namespaced `session_archive.*`, so they cannot shadow a core tool:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_sessions` | List working sessions (shares its name with the `/list_sessions` command — different namespaces, no collision) |
+| `list_sessions` | List working sessions (shares its name with the `/list_sessions` command — different namespaces: command vs tool, no collision) |
 | `list_archived` | List archived sessions, optional `search` |
 | `archive` | Archive by `session_ids[]` |
 | `read_transcript` | Read a transcript by id or search |
@@ -208,6 +227,16 @@ Namespaced `session_archive.*`, so they cannot shadow a core tool:
   timestamp.
 - Schema-agnostic: discovers `session_v2` (v2.x) or `session` (v1.x) and
   introspects its columns rather than hardcoding either.
+
+## Known issue: stale palette
+
+The desktop app caches its session list and does **not** refresh it when this
+plugin archives, restores, or deletes sessions. After using `/list_sessions`
+(or the `session_archive` tools) to archive, restore, or delete sessions, the
+desktop app's palette (the three-square icon) will still show the old list.
+
+**Workaround:** restart OpenCode (`opencode reload` or restart the desktop app)
+to refresh the palette from the database.
 
 ## Commands are type-only
 
