@@ -1,0 +1,44 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      
+      - name: Install dependencies
+        run: bun install
+      
+      - name: Run plugin tests
+        run: bun run test:plugin
+      
+      - name: Check module loading
+        run: bun run check
+      
+      - name: Typecheck
+        run: bun run typecheck
+
+  test-popup:
+    runs-on: ubuntu-latest
+    # Popup tests need Wayland display - skip on CI for now
+    # Can be enabled with a virtual display if needed
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+      - name: Install dependencies
+        run: bun install
+      - name: Run popup tests
+        run: bun run test:popup
