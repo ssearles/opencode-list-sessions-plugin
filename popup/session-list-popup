@@ -262,6 +262,7 @@ def session_stats(store: Store, session_id: str) -> dict:
     tools: Counter = Counter()
     files: Counter = Counter()
     models: Counter = Counter()
+    providers: Counter = Counter()
     errors = 0
     compactions = 0
     switches = 0
@@ -281,6 +282,7 @@ def session_stats(store: Store, session_id: str) -> dict:
             errors += 1
         if kind == "assistant" and j.get("model"):
             models[j["model"].get("id") or "?"] += 1
+            providers[j["model"].get("providerID") or "?"] += 1
         for part in j.get("content") or []:
             if not isinstance(part, dict) or part.get("type") != "tool":
                 continue
@@ -303,6 +305,7 @@ def session_stats(store: Store, session_id: str) -> dict:
     out["tools"] = tools
     out["files"] = files
     out["models"] = dict(models)
+    out["providers"] = dict(providers)
     out["tool_calls"] = sum(tools.values())
     out["errors"] = errors
     out["compactions"] = compactions
@@ -347,6 +350,7 @@ def database_stats(store: Store) -> dict:
     files: Counter = Counter()
     tools: Counter = Counter()
     models: Counter = Counter()
+    providers: Counter = Counter()
     kinds: Counter = Counter()
 
     for sid, kind, raw in db.execute(
@@ -359,6 +363,7 @@ def database_stats(store: Store) -> dict:
         kinds[kind or "unknown"] += 1
         if j.get("type") == "assistant" and j.get("model"):
             models[j["model"].get("id") or "?"] += 1
+            providers[j["model"].get("providerID") or "?"] += 1
         for part in j.get("content") or []:
             if not isinstance(part, dict) or part.get("type") != "tool":
                 continue
@@ -410,6 +415,7 @@ def database_stats(store: Store) -> dict:
         "tools": tools,
         "files": files,
         "models": dict(models),
+        "providers": dict(providers),
         "sizes": {r[0]: (r[1] or "(untitled)", per_session.get(r[0], 0))
                   for r in rows},
         "created_range": (min((r[8] for r in rows if r[8]), default=None),
@@ -1886,6 +1892,7 @@ def session_sections(s: dict) -> list[tuple[str, object]]:
         ("TOOLS", "\n".join(_counter_rows(s["tools"]))),
         ("FILES TOUCHED", group_by_directory(s["files"])),
         ("MODELS", "\n".join(_counter_rows(s["models"]))),
+        ("PROVIDERS", "\n".join(_counter_rows(s.get("providers", {})))),
         ("SESSION", "\n".join(tail)),
     ]
 
@@ -2040,6 +2047,7 @@ def database_sections(d: dict, store: "Store | None" = None) -> list[tuple[str, 
         ("TOOLS, ALL SESSIONS", "\n".join(_counter_rows(d["tools"], 14))),
         ("MOST TOUCHED FILES", group_by_directory(d["files"])),
         ("MODELS", "\n".join(_counter_rows(d["models"]))),
+        ("PROVIDERS", "\n".join(_counter_rows(d.get("providers", {})))),
         ("MESSAGES BY KIND", "\n".join(
             f"  {kind:<12} {count:,}" for kind, count in
             sorted(d["kinds"].items(), key=lambda kv: -kv[1]))),
@@ -2289,6 +2297,16 @@ class Window(Gtk.Window):
         )
         db_btn.connect("clicked", lambda *_: self._show_database_stats())
         footer.pack_end(db_btn, False, False, 0)
+
+        # Architecture diagram — how OpenCode works on this machine.
+        arch_btn = Gtk.Button(label="Architecture")
+        arch_btn.set_tooltip_text(
+            "Open a window showing how OpenCode fits together on this laptop: "
+            "Hyprland, the desktop app, the Rust server, the plugin host, the "
+            "Python GTK windows, the SQLite database, and the LLM provider."
+        )
+        arch_btn.connect("clicked", lambda *_: self._show_architecture())
+        footer.pack_end(arch_btn, False, False, 0)
 
         # A-, A+ and Reset, matching opencode-popup-window's info-window so the
         # two behave the same way in the same place. Packed between Database and
@@ -2906,6 +2924,28 @@ class Window(Gtk.Window):
             "OpenCode database",
             database_sections(database_stats(self.store), self.store),
             f"{self.store.path}",
+        )
+        report.show_all()
+
+    def _show_architecture(self) -> None:
+        """
+        Open a window with the architecture diagram.
+
+        Shows how OpenCode fits together on this machine: Hyprland, the desktop
+        app, the Rust server, the plugin host, the Python GTK windows, the
+        SQLite database, and the LLM provider. Read-only, nothing writes.
+        """
+        # Read the architecture file from the repo
+        arch_path = Path(__file__).parent.parent / "opencode-architecture.md"
+        if arch_path.exists():
+            body = arch_path.read_text(encoding="utf-8")
+        else:
+            body = "Architecture diagram not found at " + str(arch_path)
+
+        report = StatsWindow(
+            "OpenCode Architecture",
+            [("ARCHITECTURE", body)],
+            "How the pieces connect on this laptop",
         )
         report.show_all()
 
