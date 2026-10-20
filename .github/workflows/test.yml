@@ -24,7 +24,7 @@ jobs:
         run: bun install
       
       - name: Run plugin tests
-        run: bun run test:plugin
+        run: node --test test/*.test.ts
       
       - name: Check module loading
         run: bun run check
