@@ -2935,8 +2935,9 @@ class Window(Gtk.Window):
         app, the Rust server, the plugin host, the Python GTK windows, the
         SQLite database, and the LLM provider. Read-only, nothing writes.
         """
-        # Read the architecture file from the repo
-        arch_path = Path(__file__).parent.parent / "opencode-architecture.md"
+        # Read the architecture file from the workspace root
+        # (not the transcript repo, since the diagram was written there)
+        arch_path = Path(__file__).parent.parent.parent / "opencode-architecture.md"
         if arch_path.exists():
             body = arch_path.read_text(encoding="utf-8")
         else:
