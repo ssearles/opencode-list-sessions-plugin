@@ -3385,15 +3385,32 @@ def _image_markdown(attachment: dict, index: int, assets_dir: Path | None,
     if index >= limit:
         return "", 0, 1
 
+    # Try base64 `data` first (pasted screenshots), then `path` (chat upload button).
     payload = attachment.get("data") or ""
-    if not payload:
-        return "", 0, 1
-    # Tolerate a data: URL prefix; the payload is bare base64 today but this
-    # costs nothing and would not have been true on every release.
-    payload = payload.split(",", 1)[1] if payload.startswith("data:") else payload
-    try:
-        blob = base64.b64decode(payload, validate=False)
-    except Exception:  # noqa: BLE001
+    blob = None
+    if payload:
+        # Tolerate a data: URL prefix; the payload is bare base64 today but this
+        # costs nothing and would not have been true on every release.
+        payload = payload.split(",", 1)[1] if payload.startswith("data:") else payload
+        try:
+            blob = base64.b64decode(payload, validate=False)
+        except Exception:  # noqa: BLE001
+            blob = None
+
+    if blob is None:
+        # Fall back to reading a local file from `path` (chat file upload).
+        path_str = attachment.get("path") or ""
+        if path_str:
+            try:
+                # Expand ~ and resolve relative to cwd
+                path = Path(path_str).expanduser()
+                if not path.is_absolute():
+                    path = Path.cwd() / path
+                blob = path.read_bytes()
+            except Exception:  # noqa: BLE001
+                blob = None
+
+    if blob is None:
         return "", 0, 1
 
     filename = f"{index + 1:03d}-{stem or 'image'}{ext}"
