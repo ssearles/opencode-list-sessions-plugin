@@ -2929,26 +2929,36 @@ class Window(Gtk.Window):
 
     def _show_architecture(self) -> None:
         """
-        Open a window with the architecture diagram.
-
+        Open a window with the architecture diagram image.
+        
         Shows how OpenCode fits together on this machine: Hyprland, the desktop
         app, the Rust server, the plugin host, the Python GTK windows, the
         SQLite database, and the LLM provider. Read-only, nothing writes.
         """
-        # Read the architecture file from the workspace root
-        # Use resolve() to handle symlinks correctly
-        arch_path = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
-        if arch_path.exists():
-            body = arch_path.read_text(encoding="utf-8")
+        # Path to the rendered architecture diagram image
+        arch_image = Path(__file__).resolve().parent.parent.parent / "opencode-arch-flow.png"
+        
+        if arch_image.exists():
+            # Launch info-window with the architecture diagram image
+            import subprocess
+            subprocess.Popen(
+                ["setsid", "info-window", "--title", "OpenCode Architecture", str(arch_image)],
+                start_new_session=True
+            )
         else:
-            body = "Architecture diagram not found at " + str(arch_path)
-
-        report = StatsWindow(
-            "OpenCode Architecture",
-            [("ARCHITECTURE", body)],
-            "How the pieces connect on this laptop",
-        )
-        report.show_all()
+            # Fallback to text version
+            arch_path = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
+            if arch_path.exists():
+                body = arch_path.read_text(encoding="utf-8")
+            else:
+                body = "Architecture diagram not found"
+            
+            report = StatsWindow(
+                "OpenCode Architecture",
+                [("ARCHITECTURE", body)],
+                "How the pieces connect on this laptop",
+            )
+            report.show_all()
 
     def _save_transcript(self, data: dict) -> None:
         """
