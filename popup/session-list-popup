@@ -2936,8 +2936,8 @@ class Window(Gtk.Window):
         SQLite database, and the LLM provider. Read-only, nothing writes.
         """
         # Read the architecture file from the workspace root
-        # (not the transcript repo, since the diagram was written there)
-        arch_path = Path(__file__).parent.parent.parent / "opencode-architecture.md"
+        # Use resolve() to handle symlinks correctly
+        arch_path = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
         if arch_path.exists():
             body = arch_path.read_text(encoding="utf-8")
         else:
