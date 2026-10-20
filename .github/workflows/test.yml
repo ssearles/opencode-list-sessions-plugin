@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Debug - list directory contents
+        run: ls -la && echo "---" && ls -la test/ 2>/dev/null || echo "test dir not found"
+      
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
