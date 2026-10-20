@@ -124,6 +124,32 @@ window starts there. Both report windows honour it.
 `Database` also carries the machine, because "why is this slow on this laptop"
 is a question the per-session figures cannot answer:
 
+### Sorting and filtering
+
+The window header has a **sort toggle** (three radio buttons) and a **search box**.
+
+**Sort modes** (cycle with the toggle or click the header):
+
+| Mode | Label | Sorts by |
+| --- | --- | --- |
+| `name` | **Name** | Session title, alphabetical |
+| `created` | **Start date** | `time_created`, newest first |
+| `updated` | **Last modified** | `time_updated`, newest first (default) |
+
+The default is **Last modified** (newest first), because "what did I work on
+lately" is the common question. Click the sort header to cycle; the choice
+persists across window opens.
+
+**Search box** (magnifying glass icon in the header):
+
+- Type to filter the list in real time (~150 ms debounce).
+- Searches **title**, **id**, and **directory** simultaneously.
+- Case-insensitive, substring match.
+- Escape clears the search; the search box also has a clear button (✕).
+
+The filter is applied *after* sorting, so you can sort by name, then filter,
+or sort by date, then filter — the two are independent.
+
 ```
 machine                LENOVO Lenovo ideapad FLEX 4-1470
                        notebook   type 80SA   bios 0VCN22WW(V1.06)
