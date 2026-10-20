@@ -168,7 +168,7 @@ describe("/list_sessions reports are status, not instructions", () => {
 
     const opened = __popupOpenedNote()
     // What each mode is called, as the report must call it.
-    const phrases: Record<string, string> = {
+    const phrases: Record<string, RegExp> = {
       name: /sorted by name/i,
       created: /most recently started|newest first|start date/i,
       updated: /most recently modified|newest first|last modified/i,
