@@ -9,11 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: .
       
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
