@@ -18,16 +18,16 @@ jobs:
           bun-version: latest
       
       - name: Install dependencies
-        run: cd opencode-list-sessions-plugin && bun install
+        run: bun install
       
       - name: Run plugin tests
-        run: cd opencode-list-sessions-plugin && bun run test:plugin
+        run: bun run test:plugin
       
       - name: Check module loading
-        run: cd opencode-list-sessions-plugin && bun run check
+        run: bun run check
       
       - name: Typecheck
-        run: cd opencode-list-sessions-plugin && bun run typecheck
+        run: bun run typecheck
 
   test-popup:
     runs-on: ubuntu-latest
