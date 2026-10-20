@@ -42,6 +42,11 @@ SQLite and providing a restore mechanism if the user wants to resume a session.
 This plugin also provides session statistics and overall database statistics,
 plus an architecture diagram via the **Architecture** button in the popup window.
 
+> **Note: stale palette.** The desktop app caches the session list shown in this
+> menu. After archiving, restoring, or deleting sessions via `/list_sessions`
+> (or the `session_archive` tools), the 3-squares menu will still show the old
+> list until you restart OpenCode (`opencode reload` or restart the desktop app).
+
 The AI chatbot discovered that **Export truncates.** The TUI `/export` writes only
 the messages currently loaded in the window
 ([#50732](https://github.com/anomalyco/opencode/issues/50732),
