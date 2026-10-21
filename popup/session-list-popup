@@ -1038,6 +1038,7 @@ class StatsWindow(Gtk.Window):
         super().__init__(title=title)
         self.set_type_hint(Gdk.WindowType.TOPLEVEL)
         self._sections = sections
+        self.font_size = load_font_size()
 
         screen = Gdk.Screen.get_default()
         if screen is not None:
@@ -1121,6 +1122,26 @@ class StatsWindow(Gtk.Window):
         copy.connect("clicked", self._on_copy)
         footer.pack_end(copy, False, False, 0)
 
+        # A-, A+ and Reset, matching the main window so the
+        # two behave the same way in the same place.
+        smaller = Gtk.Button(label="A-")
+        smaller.set_tooltip_text(
+            f"Smaller text. Also Ctrl+minus. Smallest is {FONT_MIN}px.")
+        smaller.connect("clicked", lambda *_: self.set_font_size(self.font_size - FONT_STEP))
+        footer.pack_end(smaller, False, False, 0)
+
+        bigger = Gtk.Button(label="A+")
+        bigger.set_tooltip_text(
+            f"Bigger text. Also Ctrl+plus. Largest is {FONT_MAX}px.")
+        bigger.connect("clicked", lambda *_: self.set_font_size(self.font_size + FONT_STEP))
+        footer.pack_end(bigger, False, False, 0)
+
+        reset_size = Gtk.Button(label="Reset size")
+        reset_size.set_tooltip_text(
+            f"Back to the default {FONT_DEFAULT}px. Also Ctrl+0.")
+        reset_size.connect("clicked", lambda *_: self.set_font_size(FONT_DEFAULT))
+        footer.pack_end(reset_size, False, False, 0)
+
         close = Gtk.Button(label="Close")
         close.get_style_context().add_class("footer-label")
         close.connect("clicked", lambda *_: self.destroy())
@@ -1165,6 +1186,21 @@ class StatsWindow(Gtk.Window):
         self.status.set_text(
             "Every section is open." if expanded
             else "Every section is folded away.")
+
+    def set_font_size(self, size: int) -> None:
+        """Set the font size for the report text."""
+        size = max(FONT_MIN, min(FONT_MAX, size))
+        if size == self.font_size:
+            return
+        self.font_size = size
+        save_font_size(size)
+
+        # Update CSS for all TextViews in the window
+        css = Gtk.CssProvider()
+        css.load_from_data(scaled_css(CSS, self.font_size))
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def _on_copy(self, *_args) -> None:
         """Copy through wl-copy, for the reason the main window does."""
@@ -2811,6 +2847,10 @@ class Window(Gtk.Window):
                 f"{'Archived' if archive else 'Restored'}: "
                 f"{data_title(session_id, self.store)}  ·  backup {backup}"
             )
+            self._toast(
+                "Palette is stale — restart OpenCode (opencode reload) to sync",
+                error=False
+            )
         else:
             detail = res["errors"][0] if res["errors"] else "no rows changed"
             self._toast(f"{verb} did nothing: {detail}", error=True)
@@ -3126,6 +3166,10 @@ class Window(Gtk.Window):
         if response == RESP_ARCHIVE_INSTEAD:
             # Archive instead: reversible, and does the same tidying job.
             self._act(data["id"], archive=True)
+            self._toast(
+                "Palette is stale — restart OpenCode (opencode reload) to sync",
+                error=False
+            )
             return
         if response != RESP_DELETE:
             return
@@ -3139,6 +3183,10 @@ class Window(Gtk.Window):
         if removed:
             self.reload()
             self.status.set_text(f"Deleted {data['title'] or data['id']}")
+            self._toast(
+                "Palette is stale — restart OpenCode (opencode reload) to sync",
+                error=False
+            )
         else:
             self._toast("Nothing was deleted.", error=True)
 
