@@ -936,13 +936,9 @@ row.selected .title { color: #000000; }
    piece of copy in this project said "right-click", which described the less
    discoverable of the two and made the obvious one look broken.
 
-   `:hover` does this with no motion handler and no state flag - GTK applies
-   it when the pointer is over the row, so there is nothing to keep in sync
-   and nothing to leave stale when rows are rebuilt.
-
-   Lighter than `row.selected` on purpose. A hover is a hint and must not look
-   like a selection, or it lies about which row the buttons will hit. */
-row:hover { background-color: #f2f6f9; }
+   GTK3's :hover on ListBoxRow doesn't fire when a child fills the row.
+   We use enter/leave on outer box to toggle .hover class on the row. */
+.row.hover { background-color: #f2f6f9; }
 
 /* The action strip under the clicked row. */
 .actions {
@@ -989,6 +985,10 @@ row:hover { background-color: #f2f6f9; }
   color: #707070;
 }
 
+/* Radio button in session rows - make indicator visible */
+.row radiobutton { min-width: 16px; min-height: 16px; }
+.row radiobutton check { min-width: 12px; min-height: 12px; margin: 2px; }
+
 .section {
   color: #333333;
   font-size: 10px;
@@ -1002,6 +1002,14 @@ row:hover { background-color: #f2f6f9; }
   background-color: #f0f0f0;
 }
 .hintbar-label { color: #444444; font-size: 11px; }
+
+/* Switch in session rows - make indicator clearly visible */
+.row .session-switch { min-width: 48px; min-height: 28px; margin: 2px; }
+.row .session-switch slider { background-color: #c62828; border: 2px solid #b71c1c; min-width: 20px; min-height: 20px; border-radius: 50%; }
+.row .session-switch:not(:checked) slider { background-color: #e8e8e8; border: 2px solid #999; }
+.row .session-switch:checked slider { background-color: #c62828; border: 2px solid #b71c1c; }
+.row .session-switch trough { background-color: #e8e8e8; border-radius: 14px; min-width: 44px; min-height: 24px; border: 2px solid #999; }
+.row .session-switch:checked trough { background-color: #ffebee; border: 2px solid #c62828; }
 
 /* The row holding the sort toggle and the search box. Sits on a band of its
    own so it reads as a control strip rather than as the head of the list, and
@@ -1036,7 +1044,8 @@ class StatsWindow(Gtk.Window):
     def __init__(self, title: str, sections: list[tuple[str, str]],
                  subtitle: str = ""):
         super().__init__(title=title)
-        self.set_type_hint(Gdk.WindowType.TOPLEVEL)
+        # Use DIALOG hint so Wayland compositors (Hyprland) center it
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         self._sections = sections
         self.font_size = load_font_size()
         self._text_views: list[Gtk.TextView] = []
@@ -1046,6 +1055,11 @@ class StatsWindow(Gtk.Window):
         if screen is not None:
             sw, sh = screen.get_width(), screen.get_height()
             self.set_default_size(min(880, int(sw * 0.7)), min(760, int(sh * 0.84)))
+
+        # Center on screen (GTK WindowPosition.CENTER works on X11/Wayland)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        # Stay above other windows, behave like a popup
+        self.set_keep_above(True)
 
         # Same size the main window is using, so a report opened after pressing A+
         # does not come back at the old one. The report is a table of numbers
@@ -2134,12 +2148,12 @@ def format_database_report(d: dict) -> str:
 class Window(Gtk.Window):
     def __init__(self, store: Store):
         super().__init__(title="OpenCode sessions")
-        # Ask to float and to centre, and to stay above other windows if the
-        # compositor honours it. Hyprland does not honour GTK's transient-for
-        # hint from a detached launch, which is why there is also a window rule
-        # in looknfeel.lua -- this is the portable half of the same request.
-        self.set_type_hint(Gdk.WindowType.TOPLEVEL)
+        # Set WM_CLASS so Hyprland can match it with window rules
+        self.set_wmclass("session-list-popup", "session-list-popup")
+        # Use DIALOG hint so Wayland compositors (Hyprland) center it
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
         self.store = store
         self.set_default_size(900, 620)
         self.font_size = load_font_size()
@@ -2511,7 +2525,20 @@ class Window(Gtk.Window):
 
     def _row(self, d: dict, archived: bool) -> Gtk.Widget:
         row = Gtk.ListBoxRow()
+        row.get_style_context().add_class("row")
         row.session_id = d["id"]
+        row.set_selectable(False)  # Only switch triggers selection
+
+        # Switch as row selector - clicking it shows the action strip
+        switch = Gtk.Switch()
+        switch.set_halign(Gtk.Align.START)
+        switch.set_valign(Gtk.Align.CENTER)
+        switch.set_margin_start(8)
+        switch.set_margin_end(8)
+        switch.set_can_focus(False)
+        switch.set_active(False)
+        switch.get_style_context().add_class("session-switch")
+        switch.connect("notify::active", self._on_switch_changed, row)
 
         # A GtkListBoxRow is a GtkBin: exactly one child. The row content and
         # the action strip therefore share a single vertical wrapper, which is
@@ -2519,11 +2546,20 @@ class Window(Gtk.Window):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         row.add(outer)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        box.set_margin_top(5)
-        box.set_margin_bottom(5)
-        box.set_margin_start(14)
-        box.set_margin_end(14)
+        # Switch + content in a horizontal box
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        outer.pack_start(content_box, False, False, 0)
+
+        # Switch on the left
+        content_box.pack_start(switch, False, False, 0)
+
+        # Content on the right (fills remaining space)
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.set_margin_top(5)
+        content.set_margin_bottom(5)
+        content.set_margin_start(14)
+        content.set_margin_end(14)
+        content_box.pack_start(content, True, True, 0)
 
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         texts.set_valign(Gtk.Align.CENTER)
@@ -2533,9 +2569,6 @@ class Window(Gtk.Window):
         title.get_style_context().add_class("title")
         title.set_xalign(0)
         title.set_ellipsize(3)
-        # Expands so a long title ellipsizes instead of pushing the ARCHIVED
-        # chip against the text. Without the expand the chip sat immediately
-        # after whatever width the label happened to take.
         title.set_hexpand(True)
         title.set_max_width_chars(60)
         title_box.pack_start(title, True, True, 0)
@@ -2545,8 +2578,6 @@ class Window(Gtk.Window):
             chip.set_valign(Gtk.Align.CENTER)
             title_box.pack_start(chip, False, False, 0)
         elif d.get("is_live"):
-            # The session you are working in. Marked rather than hidden, so it
-            # is obvious why it behaves differently from the rows around it.
             chip = Gtk.Label(label="THIS SESSION")
             chip.get_style_context().add_class("chip-live")
             chip.set_valign(Gtk.Align.CENTER)
@@ -2571,25 +2602,17 @@ class Window(Gtk.Window):
         ident.set_xalign(0)
         texts.pack_start(ident, False, False, 0)
 
-        box.pack_start(texts, True, True, 0)
-        outer.pack_start(box, False, False, 0)
+        content.pack_start(texts, True, True, 0)
 
-        # The action strip sits inside the same row, directly beneath the title,
-        # so the choice is presented against the session it will act on rather
-        # than in a menu that has drifted somewhere else on screen.
+        # The action strip sits inside the same row, directly beneath the title
         strip = self._action_strip(d, archived)
-        # no_show_all, not hide(). A plain hide() is undone by every later
-        # show_all() — including the one the window itself makes when it first
-        # maps — which would leave every strip visible on open.
         strip.set_no_show_all(True)
         strip.hide()
         outer.pack_start(strip, False, False, 0)
         row.actions = strip
+        row.switch = switch
 
-        # connect(), not `row.button_press_event = ...`. The attribute form is
-        # not honoured for this signal on this PyGObject, so the click handler
-        # would silently never run and every strip would stay hidden.
-        row.connect("button-press-event", self._on_press)
+        # No button-press handler needed - switch handles selection
         return row
 
     def _action_strip(self, d: dict, archived: bool) -> Gtk.Widget:
@@ -2760,7 +2783,7 @@ class Window(Gtk.Window):
         Opening a strip costs one right-click and the only ways out were Escape
         or a second click on the same row, neither of which is offered by the
         strip itself. So the strip carries its own exit, and this is where all
-        three routes land: the button, Escape, and the toggle on re-click.
+        three routes land: the button, Escape, and the switch on re-click.
 
         unselect_all() alone is not enough. It does not reliably emit
         row-selected with None, so the strip is hidden here as well rather than
@@ -2771,35 +2794,38 @@ class Window(Gtk.Window):
             strip = getattr(r, "actions", None)
             if strip is not None:
                 strip.hide()
+            switch = getattr(r, "switch", None)
+            if switch is not None:
+                switch.set_active(False)
 
     def _on_press(self, widget, event) -> bool:
         """
-        Left-click toggles the strip, right-click selects and opens it.
-
-        Both routes exist because finishing with a click on a big button is
-        often easier than finding the right-click spot again.
+        Only switch clicks should toggle the strip.
+        Clicks on the session row itself do nothing.
         """
         row = self._row_of(widget)
         if row is None or getattr(row, "is_section", False):
             return False
 
+        # Right-click on row still selects (for context menu if needed)
         if event.button == 3:
             self.listbox.select_row(row)
             self.listbox.emit("row-selected", row)
             return True
 
-        if event.button == 1:
-            if self.listbox.get_selected_row() is row:
-                # Re-clicking the open row closes it. _dismiss() hides the strip
-                # as well as unselecting, because unselect_all() does not
-                # reliably emit row-selected with None.
-                self._dismiss()
-            else:
-                self.listbox.select_row(row)
-                self.listbox.emit("row-selected", row)
-            return True
-
+        # Left-click on row does nothing - only radio button clicks work
         return False
+
+    def _on_switch_changed(self, switch, _pspec, row) -> None:
+        """Switch changed -> select the row (shows its strip)."""
+        if switch.get_active():
+            # Switch turned ON -> show strip
+            self.listbox.select_row(row)
+            self.listbox.emit("row-selected", row)
+        else:
+            # Switch turned OFF -> hide strip
+            if row.actions and not getattr(self, "_switch_setting", False):
+                row.actions.hide()
 
     def _row_of(self, widget):
         while widget is not None and not isinstance(widget, Gtk.ListBoxRow):
@@ -2828,6 +2854,10 @@ class Window(Gtk.Window):
                 strip.set_no_show_all(True)
             else:
                 strip.hide()
+                # Turn off switch for other rows
+                switch = getattr(r, "switch", None)
+                if switch is not None:
+                    switch.set_active(False)
 
     # ------------------------------------------------------------- behaviour
 
