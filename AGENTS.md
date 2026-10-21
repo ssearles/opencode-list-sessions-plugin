@@ -322,7 +322,7 @@ resolve to **nothing** rather than to several sessions — this is what stops
 | `test/sessionlog.test.ts` | 7 | The running log appends, and trims to the cap |
 | `test/status.test.ts` | 15 | `/list_sessions` reports are framed as status, not requests — the agent-loop guard |
 | `test/retention.test.ts` | 4 | Bounded backup snapshots |
-| `popup/test-popup-gui.py` | 195 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
+| `popup/test-popup-gui.py` | 197 | Widgets, buttons, strips, sort orders, search box, layout, delete dialog, export plumbing, the banner, text size, and that the window fits the screen at every size |
 | `popup/test-popup-writes.py` | 60 | The write path: archive/restore guards, `--current` over the timestamp, delete, backups, ordering, images |
 | `popup/test-popup-lifecycle.py` | 6 | Closing the window ends the process; no orphans |
 | `popup/test-popup-scroll.py` | 7 | Many sessions stay reachable; the scrollbar is real |
@@ -626,23 +626,24 @@ forever. `_copy_id()` itself is kept, unreachable, with a docstring saying why
 — deleting it would delete the decision along with the code.
 
 ### A Left Click Is The Action, And Copy That Said "Right-Click" Hid It
-`_on_press` has always handled both buttons: **button 1 toggles** the strip,
-**button 3 selects and opens** it. But every piece of user-facing copy said
-"right-click" — the banner, the two section headings, the strip label, the
-palette line and `popupOpenedNote()`. That described the *less discoverable* of
-the two and made the obvious one look broken.
+`_on_press` handles both buttons: **button 1 opens** the strip and closes it
+again on a second click, **button 3 opens** it without closing. But every piece
+of user-facing copy said "right-click" — the banner, the two section headings,
+the strip label, the palette line and `popupOpenedNote()`. That described the
+*less discoverable* of the two and made the obvious one look broken.
 
-So the copy says **click**, and rows carry `row:hover`, which is the affordance
+So the copy says **click**, and rows carry `.hover`, which is the affordance
 the copy cannot provide: you can see a row is clickable before clicking it.
 
 Deliberately **lighter than `row.selected`**. A hover is a hint; if it looked
-like a selection it would lie about which row the buttons will hit. No motion
-handler and no state flag — `:hover` is GTK's own, so there is nothing to keep
-in sync and nothing to leave stale when rows are rebuilt.
+like a selection it would lie about which row the buttons will hit.
 
-Section rows need no exclusion rule: `_section()` calls `set_selectable(False)`,
-so GTK never hovers them. Asserted, because "GTK probably does the right thing
-here" is not a thing to rely on.
+`:hover` cannot provide it here: rows have no `GdkWindow` of their own (the
+listbox owns the window, and a click is resolved to a row with
+`get_row_at_y`), and GTK3 does not fire `:hover` on a row filled by a child.
+So `_on_motion` moves the class to the row under the pointer, and
+`leave-notify-event` clears it. Section rows are skipped there and are not
+selectable, so they never get the hover class.
 
 **`test-popup-gui.py` asserts the stylesheet PARSES**, not merely that it
 contains a rule. GTK3 raises on an unsupported selector rather than ignoring

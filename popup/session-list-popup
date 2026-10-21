@@ -936,8 +936,9 @@ row.selected .title { color: #000000; }
    piece of copy in this project said "right-click", which described the less
    discoverable of the two and made the obvious one look broken.
 
-   GTK3's :hover on ListBoxRow doesn't fire when a child fills the row.
-   We use enter/leave on outer box to toggle .hover class on the row. */
+   GTK3's :hover on ListBoxRow doesn't fire when a child fills the row, and
+   the rows have no window of their own, so the class is moved by pointer
+   motion over the listbox (see _on_motion). */
 .row.hover { background-color: #f2f6f9; }
 
 /* The action strip under the clicked row. */
@@ -1812,11 +1813,11 @@ def environment_stats(store: Store) -> dict:
     ):
         env[label] = _file_version(path)
 
-    # The scripts the plugins will actually run. A stale copy in ~/.local/bin
+    # The script the plugin will actually run. A stale copy in ~/.local/bin
     # tests stale code and reports nothing wrong, which has happened in this
     # repo more than once.
     resolved = {}
-    for name in ("session-list-popup", "info-window"):
+    for name in ("session-list-popup",):
         path = Path.home() / ".local" / "bin" / name
         try:
             resolved[name] = str(path.resolve())
@@ -2352,6 +2353,18 @@ class Window(Gtk.Window):
         # there is no confirmation of which session an action would hit.
         self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.listbox.connect("row-selected", self._on_row_selected)
+        # Rows have no GdkWindow of their own, so the listbox owns the window
+        # clicks and pointer motion arrive on: resolve the row from event.y.
+        self.listbox.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.listbox.connect("button-press-event", self._on_press)
+        self.listbox.connect("motion-notify-event", self._on_motion)
+        self.listbox.connect(
+            "leave-notify-event", lambda *_: self._set_hover(None)
+        )
         scroller.add(self.listbox)
         root.pack_start(scroller, True, True, 0)
 
@@ -2832,23 +2845,75 @@ class Window(Gtk.Window):
             if switch is not None:
                 switch.set_active(False)
 
-    def _on_press(self, widget, event) -> bool:
+    def _on_press(self, _widget, event) -> bool:
         """
-        Only switch clicks should toggle the strip.
-        Clicks on the session row itself do nothing.
+        A click on a session row opens its strip; a second click closes it.
+
+        The row is a much larger target than its switch, and the footer and
+        the stylesheet both promise that clicking it works. The rows have no
+        window of their own, so this is connected to the listbox and the row
+        is the one under the pointer.
+
+        Presses that arrive on a child with its own window -- the switch or a
+        button in the strip -- are left alone, otherwise a switch click would
+        open the strip and this handler would immediately act on it again.
         """
-        row = self._row_of(widget)
+        if (event.window is not None
+                and event.window is not self.listbox.get_window()):
+            return False
+        if event.button not in (1, 3):
+            return False
+
+        row = self.listbox.get_row_at_y(int(event.y))
         if row is None or getattr(row, "is_section", False):
             return False
 
-        # Right-click on row still selects (for context menu if needed)
-        if event.button == 3:
+        switch = getattr(row, "switch", None)
+        if switch is not None and self._pointer_inside(switch, event):
+            return False
+
+        strip = getattr(row, "actions", None)
+        if strip is not None and strip.get_visible():
+            # Right-click on the open row keeps it open; a left click on it is
+            # the documented way to close it without doing anything.
+            if event.button == 3:
+                return True
+            self._dismiss()
+        else:
             self.listbox.select_row(row)
             self.listbox.emit("row-selected", row)
-            return True
+        return True
 
-        # Left-click on row does nothing - only radio button clicks work
+    def _pointer_inside(self, widget, event) -> bool:
+        x, y = widget.translate_coordinates(self.listbox, 0, 0)
+        a = widget.get_allocation()
+        return x <= event.x < x + a.width and y <= event.y < y + a.height
+
+    def _on_motion(self, _widget, event) -> bool:
+        """Highlight the row under the pointer, so it looks clickable."""
+        row = self.listbox.get_row_at_y(int(event.y))
+        if row is not None and getattr(row, "is_section", False):
+            row = None
+        self._set_hover(row)
         return False
+
+    def _set_hover(self, target) -> None:
+        """
+        Move the .hover class to `target`, or clear it when target is None.
+
+        A row whose strip is already open is left in its selected colour: it
+        is not a hover candidate, it is the row in use.
+        """
+        if target is not None:
+            strip = getattr(target, "actions", None)
+            if strip is not None and strip.get_visible():
+                target = None
+        for r in self.listbox.get_children():
+            ctx = r.get_style_context()
+            if r is target:
+                ctx.add_class("hover")
+            else:
+                ctx.remove_class("hover")
 
     def _on_switch_changed(self, switch, _pspec, row) -> None:
         """Switch changed -> select the row (shows its strip)."""
@@ -2857,14 +2922,15 @@ class Window(Gtk.Window):
             self.listbox.select_row(row)
             self.listbox.emit("row-selected", row)
         else:
-            # Switch turned OFF -> hide strip
-            if row.actions and not getattr(self, "_switch_setting", False):
-                row.actions.hide()
-
-    def _row_of(self, widget):
-        while widget is not None and not isinstance(widget, Gtk.ListBoxRow):
-            widget = widget.get_parent()
-        return widget
+            # Switch turned OFF -> hide its strip. Only drop the list selection
+            # when this row owned it: _on_row_selected turns the switches of
+            # *other* rows off while opening a new one, and unselecting there
+            # would close the row that was just clicked.
+            strip = getattr(row, "actions", None)
+            if strip is not None and not getattr(self, "_switch_setting", False):
+                strip.hide()
+                if self.listbox.get_selected_row() is row:
+                    self.listbox.unselect_all()
 
     def _on_row_selected(self, _listbox, row) -> None:
         """

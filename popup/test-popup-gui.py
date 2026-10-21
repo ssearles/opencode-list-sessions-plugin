@@ -52,18 +52,62 @@ def check(name, cond, detail=""):
 
 def click(widget, button=1):
     """Synthesise a click on a widget's centre."""
-    ok, x, y = widget.get_allocation(), 0, 0
-    if hasattr(widget, "get_allocation"):
-        a = widget.get_allocation()
-        x, y = a.x + a.width // 2, a.y + a.height // 2
-    event = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
-    event.button = button
-    event.x, event.y = float(x), float(y)
-    event.time = Gdk.CURRENT_TIME
-    widget.emit("button-press-event", event)
+    # A list row has no GdkWindow of its own. Real presses land on the listbox,
+    # which resolves the row from the pointer position, so the event is sent
+    # there with the row's own allocation as the coordinates.
+    target = (widget.get_parent()
+              if isinstance(widget, Gtk.ListBoxRow) else widget)
+    # A reload() rebuilds the rows, and they have no allocation until GTK has
+    # run a frame; without this the click lands on whatever was at (0, 0).
     while Gtk.events_pending():
         Gtk.main_iteration_do(False)
-    return ok
+    a = widget.get_allocation()
+    event = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+    event.button = button
+    event.x, event.y = float(a.x + a.width // 2), float(a.y + a.height // 2)
+    event.time = Gdk.CURRENT_TIME
+    target.emit("button-press-event", event)
+    while Gtk.events_pending():
+        Gtk.main_iteration_do(False)
+
+
+def seed_session(db, session_id, title, offset=1):
+    """
+    Add one deterministic, unarchived session to the throwaway copy.
+
+    The filter and write checks name a session ("popup feedback") that existed
+    on the machine this suite was written on. A real database is not a fixture:
+    on a machine that never ran those sessions the checks failed for a reason
+    that had nothing to do with the code under test.
+    """
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    try:
+        donor = c.execute(
+            "SELECT * FROM session_v2 ORDER BY time_updated DESC LIMIT 1"
+        ).fetchone()
+        if donor is None:
+            return
+        row = dict(donor)
+        oldest = c.execute("SELECT MIN(time_updated) FROM session_v2").fetchone()[0]
+        stamp = (oldest or 0) - offset
+        row.update(
+            id=session_id,
+            slug=title.replace(" ", "-"),
+            title=title,
+            time_created=stamp,
+            time_updated=stamp,
+            time_archived=None,
+            time_suspended=None,
+        )
+        c.execute(
+            f"INSERT INTO session_v2 ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' for _ in row)})",
+            tuple(row.values()),
+        )
+        c.commit()
+    finally:
+        c.close()
 
 
 def archived_ids(db):
@@ -82,6 +126,8 @@ def main():
         c = sqlite3.connect(REAL)
         c.execute("VACUUM INTO ?", (str(db),))
         c.close()
+        seed_session(db, "ses_popupfeedback0000000000", "popup feedback")
+        seed_session(db, "ses_secondpopup00000000000", "popup window review", 2)
 
         store = pop.Store(db)
         win = pop.Window(store)
@@ -136,6 +182,26 @@ def main():
         print("\nleft-click again closes it")
         click(other, button=1)
         check("strip toggled off", not other.actions.get_visible())
+
+        print("\nthe switch and the row agree about which strip is open")
+        # Opening a row turns the other rows' switches off. That must not
+        # unselect the row just clicked: a strip that closes as it opens is
+        # exactly what the old switch-only code did.
+        first, second = rows[0], rows[1]
+        first.switch.set_active(True)
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        check("flipping a switch opens its row", first.actions.get_visible())
+        click(second, button=1)
+        check("clicking another row moves the strip",
+              second.actions.get_visible()
+              and not first.actions.get_visible(),
+              str([r.actions.get_visible() for r in rows[:2]]))
+        check("the first row's switch is off again",
+              not first.switch.get_active())
+        click(second, button=1)
+        check("clicking the open row closes it",
+              not second.actions.get_visible())
 
         print("\nno Refresh button, and focus re-reads the database")
         labels = []
@@ -927,9 +993,6 @@ def main():
 
         print("\nDelete really deletes, with its children, after a backup")
         rows = session_rows(win)
-        gone_row = next(r for r in rows if r.session_id not in archived_ids(db))
-        gone_id = gone_row.session_id
-        title = gone_id
 
         def count_where(db_path, sql, args=()):
             conn = sqlite3.connect(db_path)
@@ -937,6 +1000,19 @@ def main():
                 return conn.execute(sql, args).fetchone()[0]
             finally:
                 conn.close()
+
+        def has_messages(sid):
+            return count_where(
+                db, "SELECT COUNT(*) FROM session_message WHERE session_id = ?",
+                (sid,)) > 0
+
+        # A seeded fixture has no message rows, so pick a session that actually
+        # carries a conversation: the delete's cascade is the thing under test.
+        gone_row = next(r for r in rows
+                        if r.session_id not in archived_ids(db)
+                        and has_messages(r.session_id))
+        gone_id = gone_row.session_id
+        title = gone_id
 
         msgs_before = count_where(
             db, "SELECT COUNT(*) FROM session_message WHERE session_id = ?", (gone_id,))
@@ -1295,8 +1371,8 @@ def main():
         check("the shipped stylesheet parses", _parsed, _err)
         _css = pop.scaled_css(pop.CSS, pop.FONT_DEFAULT).decode()
         check("rows have a hover style, so a clickable row looks clickable",
-              re.search(r"row:hover\s*\{[^}]*background-color", _css) is not None,
-              "no row:hover background rule")
+              re.search(r"row\.hover\s*\{[^}]*background-color", _css) is not None,
+              "no row.hover background rule")
         check("the hover is lighter than the selected row, so it cannot be "
               "mistaken for a selection",
               _css.count("#f2f6f9") == 1 and "row.selected { background-color: #d6e8f5" in _css)
@@ -1315,7 +1391,7 @@ def main():
         _env = dict(pop.database_sections(pop.database_stats(_store), _store))
         _lines = _env["ENVIRONMENT"].splitlines()
         _paths = [l.strip() for l in _lines if "popup/" in l]
-        check("the resolved script paths are in the report", len(_paths) >= 2,
+        check("the resolved script paths are in the report", len(_paths) >= 1,
               str(_paths))
         # Truncated from the left, these read "…ct/opencode-session-transcript"
         # -- which names the repo but not where it is, so it cannot answer the

@@ -416,8 +416,8 @@ except OSError:
     print("  skip  cli version file not readable")
 check("whatever opencode is on PATH is named",
       env["opencode_on_path"] != "")
-check("both plugin scripts resolve to something",
-      set(env["scripts"]) == {"session-list-popup", "info-window"}
+check("the plugin script resolves to something",
+      set(env["scripts"]) == {"session-list-popup"}
       and all(v for v in env["scripts"].values()))
 check("memory is in MB and plausible",
       0 < env.get("mem_total", 0) < 10_000_000, str(env.get("mem_total")))
