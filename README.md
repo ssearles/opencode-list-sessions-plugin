@@ -60,6 +60,25 @@ screenshots pasted into the conversation.
 > you want a restorable archive, keep using `/export`, or the window's
 > **Export.json** button, which produces the same importable format.
 
+## Hyprland Configuration (required for popup window)
+
+The session popup window (`session-list-popup`) is a GTK window that requests
+to be floated and centered. On Hyprland, this requires a **window rule** in
+your Hyprland config (`~/.config/hypr/looknfeel.lua` or your Hyprland config
+file):
+
+```lua
+-- Float and center the session-list-popup window
+windowrulev2 = float, class:^(session-list-popup)$
+windowrulev2 = center, class:^(session-list-popup)$
+```
+
+Without this rule, the popup window may open as a regular tiled window
+(typically to the right of the main window) instead of floating and centered.
+
+The `info-window` (used by the **Architecture** button) also benefits from
+similar rules if you want it to float.
+
 ## Install
 
 **Not published to npm** — the name below does not resolve. Point the config at
