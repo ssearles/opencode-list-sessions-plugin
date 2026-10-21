@@ -76,8 +76,11 @@ windowrulev2 = center, class:^(session-list-popup)$
 Without this rule, the popup window may open as a regular tiled window
 (typically to the right of the main window) instead of floating and centered.
 
-The `info-window` (used by the **Architecture** button) also benefits from
-similar rules if you want it to float.
+The **Architecture** window is drawn by the popup itself, so the same rule
+covers it as well. There is no external `info-window` to install: the diagram
+is read from `opencode-architecture.md`, and a machine-specific copy in
+`~/Documents/Default Project` or `~/Documents` takes priority over the generic
+one shipped in this repo.
 
 ## Install
 

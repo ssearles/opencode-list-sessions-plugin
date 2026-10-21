@@ -3003,35 +3003,118 @@ class Window(Gtk.Window):
     def _show_architecture(self) -> None:
         """
         Open a window with the architecture diagram from markdown.
-        
+
         Shows how OpenCode fits together on this machine: Hyprland, the desktop
-        app, the Rust server, the plugin host, the Python GTK windows, the
+        app, the local server, the plugin host, the Python GTK windows, the
         SQLite database, and the LLM provider. Read-only, nothing writes.
         """
-        # Path to the cleaned up architecture markdown file
-        arch_md = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
-        
-        if arch_md.exists():
-            # Launch info-window with the markdown file (renders ASCII diagram properly)
-            import subprocess
-            subprocess.Popen(
-                ["setsid", "info-window", "--title", "OpenCode Architecture", "--format", "markdown", str(arch_md)],
-                start_new_session=True
-            )
+        # The diagram is authored per machine, so the search order decides which
+        # copy wins. A machine-specific file in the workspace must beat the
+        # generic one committed here: otherwise a checkout on a laptop with its
+        # own diagram would show this repo's picture of a different machine.
+        # The repo root is therefore the fallback, not the first hit. The old
+        # code walked three levels up from the script, which only landed on the
+        # workspace when the checkout happened to sit inside it.
+        here = Path(__file__).resolve().parent.parent  # repo root
+        roots = [
+            Path.home() / "Documents" / "Default Project",
+            Path.home() / "Documents",
+            Path.cwd(),
+            here,
+        ]
+
+        arch_md = next(
+            (r / "opencode-architecture.md" for r in roots
+             if (r / "opencode-architecture.md").is_file()), None)
+        arch_png = next(
+            (r / "opencode-arch-flow.png" for r in roots
+             if (r / "opencode-arch-flow.png").is_file()), None)
+
+        # Rendered here rather than handed to info-window: that program is not
+        # part of this repo, is not installable, and is absent on some machines
+        # -- where the spawn fails silently and the button looks broken. A
+        # TextView shows the same diagram with no dependency at all.
+        if arch_md is not None:
+            # The report view is a plain TextView, not a markdown renderer, so
+            # fences and heading hashes would otherwise appear literally.
+            lines = []
+            for line in arch_md.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    continue
+                if stripped.startswith("#"):
+                    line = stripped.lstrip("#").strip()
+                # Inline code markers are markdown, not content. Fenced blocks
+                # are dropped above; what is left is `code` in prose, and the
+                # backticks would otherwise be shown to the reader.
+                line = line.replace("`", "")
+                lines.append(line)
+            body = "\n".join(lines)
+        elif arch_png is not None:
+            win = Gtk.Window(title="OpenCode Architecture")
+            win.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+            win.set_position(Gtk.WindowPosition.CENTER)
+            win.set_keep_above(True)
+            image = Gtk.Image.new_from_file(str(arch_png))
+            scroller = Gtk.ScrolledWindow()
+            scroller.add(image)
+            win.add(scroller)
+            win.show_all()
+            return
         else:
-            # Fallback to text version
-            arch_path = Path(__file__).resolve().parent.parent.parent / "opencode-architecture.md"
-            if arch_path.exists():
-                body = arch_path.read_text(encoding="utf-8")
-            else:
-                body = "Architecture diagram not found"
-            
-            report = StatsWindow(
-                "OpenCode Architecture",
-                [("ARCHITECTURE", body)],
-                "How the pieces connect on this laptop",
+            body = (
+                "Architecture diagram not found.\n\n"
+                "Put opencode-architecture.md (or opencode-arch-flow.png) in "
+                "one of:\n\n"
+                + "\n".join(f"  {r}" for r in roots)
             )
-            report.show_all()
+
+        report = StatsWindow(
+            "OpenCode Architecture",
+            [("", body)],
+            "How the pieces connect on this laptop",
+        )
+        # No heading, so there is no expander: this window is one section, and
+        # the fold-at-N-lines rule would otherwise leave a diagram-sized one
+        # closed, which looks exactly like a broken window.
+        #
+        # The text view then asks for its full height. A TextView is a scrollable
+        # widget: outside a ScrolledWindow it requests about one line, which
+        # clipped the diagram to its first rows. The window already has a
+        # ScrolledWindow around the whole report, so nesting a second one only
+        # fought the footer for space -- what is missing is a height request.
+        # It stays a registered text view (not a Label) because that is what
+        # A+/A- scale, and the request is in pixels, so it is recomputed
+        # whenever the font changes.
+        view = report._text_views[0]
+
+        # Typography for a diagram rather than a report: a step up from the
+        # report default, room around the art, and a pixel between rows so the
+        # box-drawing rules do not fuse into solid blocks. The provider is kept
+        # in _css_provider so A+/A- replaces it rather than stacking on top of
+        # it; the size is not saved, because it belongs to this window and not
+        # to the shared report preference.
+        css = Gtk.CssProvider()
+        css.load_from_data(scaled_css(REPORT_CSS, 13))
+        view.get_style_context().add_provider(
+            css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        report._css_provider = css
+        report.font_size = 13
+        view.set_left_margin(18)
+        view.set_right_margin(18)
+        view.set_top_margin(12)
+        view.set_bottom_margin(12)
+        view.set_pixels_below_lines(1)
+
+        def fit_height(*_: object) -> None:
+            layout = view.create_pango_layout("Xg")
+            _, line_height = layout.get_pixel_size()
+            line_count = view.get_buffer().get_line_count()
+            view.set_size_request(-1, line_height * line_count + 28)
+
+        view.connect("style-updated", fit_height)
+        fit_height()
+        report.show_all()
 
     def _save_transcript(self, data: dict) -> None:
         """
