@@ -79,8 +79,9 @@ Without this rule, the popup window may open as a regular tiled window
 The **Architecture** window is drawn by the popup itself, so the same rule
 covers it as well. There is no external `info-window` to install: the diagram
 is read from `opencode-architecture.md`, and a machine-specific copy in
-`~/Documents/Default Project` or `~/Documents` takes priority over the generic
-one shipped in this repo.
+`~/Documents/Default Project` or `~/Documents` takes priority over the copy
+shipped in this repo. The window's **Save** button writes the markdown to
+`~/Downloads/opencode-architecture.md`.
 
 ## Install
 

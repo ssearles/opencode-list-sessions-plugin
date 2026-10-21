@@ -1042,7 +1042,7 @@ class StatsWindow(Gtk.Window):
     """
 
     def __init__(self, title: str, sections: list[tuple[str, str]],
-                 subtitle: str = ""):
+                 subtitle: str = "", on_save=None):
         super().__init__(title=title)
         # Use DIALOG hint so Wayland compositors (Hyprland) center it
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
@@ -1081,12 +1081,14 @@ class StatsWindow(Gtk.Window):
         t.set_xalign(0)
         t.set_ellipsize(3)
         head.pack_start(t, False, False, 0)
+        self.subtitle_label: Gtk.Label | None = None
         if subtitle:
             s = Gtk.Label(label=subtitle)
             s.get_style_context().add_class("banner-hint")
             s.set_xalign(0)
             s.set_ellipsize(3)
             head.pack_start(s, False, False, 0)
+            self.subtitle_label = s
         root.pack_start(head, False, False, 0)
 
         # One TextView per section rather than one for the lot, so folding a
@@ -1137,6 +1139,17 @@ class StatsWindow(Gtk.Window):
             "pasted into a note.")
         copy.connect("clicked", self._on_copy)
         footer.pack_end(copy, False, False, 0)
+
+        # A document, unlike a report, has a file behind it and can be saved.
+        # The handler returns the line to show in the status area, so the
+        # window stays the only place that knows about widgets.
+        if on_save is not None:
+            save = Gtk.Button(label="Save")
+            save.set_tooltip_text(
+                "Write the document to ~/Downloads so it can be opened, "
+                "shared, or kept.")
+            save.connect("clicked", lambda *_: self._flash(on_save() or "Saved."))
+            footer.pack_end(save, False, False, 0)
 
         # A-, A+ and Reset, matching the main window so the
         # two behave the same way in the same place.
@@ -1224,6 +1237,27 @@ class StatsWindow(Gtk.Window):
             context.remove_provider(self._css_provider) if self._css_provider else None
             context.add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self._css_provider = css
+
+    def _flash(self, message: str) -> None:
+        """
+        Show a short-lived message in the subtitle.
+
+        The status line is the natural home for this, but it is the first
+        thing the footer buttons squeeze: at this width it renders as a bare
+        ellipsis, so a successful save looked like nothing happened.
+        """
+        label = self.subtitle_label or self.status
+        previous = label.get_text()
+        label.set_text(message)
+        self._flash_serial = getattr(self, "_flash_serial", 0) + 1
+        serial = self._flash_serial
+
+        def restore() -> bool:
+            if serial == self._flash_serial:
+                label.set_text(previous)
+            return False
+
+        GLib.timeout_add(6000, restore)
 
     def _on_copy(self, *_args) -> None:
         """Copy through wl-copy, for the reason the main window does."""
@@ -3044,10 +3078,12 @@ class Window(Gtk.Window):
                     continue
                 if stripped.startswith("#"):
                     line = stripped.lstrip("#").strip()
-                # Inline code markers are markdown, not content. Fenced blocks
-                # are dropped above; what is left is `code` in prose, and the
-                # backticks would otherwise be shown to the reader.
-                line = line.replace("`", "")
+                # Markdown plumbing rather than content: a table separator row
+                # renders as a line of pipes and dashes in a plain text view,
+                # and inline code and bold markers would be read literally.
+                if stripped and set(stripped) <= set("|-: ") and "-" in stripped:
+                    continue
+                line = line.replace("`", "").replace("**", "")
                 lines.append(line)
             body = "\n".join(lines)
         elif arch_png is not None:
@@ -3069,10 +3105,22 @@ class Window(Gtk.Window):
                 + "\n".join(f"  {r}" for r in roots)
             )
 
+        def save_diagram() -> str:
+            """Write the markdown as it is, not the stripped-down view."""
+            target = Path.home() / "Downloads" / "opencode-architecture.md"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(arch_md.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+            except OSError as exc:
+                return f"Could not save: {exc}"
+            return f"Saved to ~/Downloads/{target.name}"
+
         report = StatsWindow(
             "OpenCode Architecture",
             [("", body)],
             "How the pieces connect on this laptop",
+            on_save=save_diagram if arch_md is not None else None,
         )
         # No heading, so there is no expander: this window is one section, and
         # the fold-at-N-lines rule would otherwise leave a diagram-sized one
@@ -3094,12 +3142,15 @@ class Window(Gtk.Window):
         # in _css_provider so A+/A- replaces it rather than stacking on top of
         # it; the size is not saved, because it belongs to this window and not
         # to the shared report preference.
+        # 12px rather than the report default: this document's diagram is 79
+        # columns, and 13px asks for 632px inside a window the compositor pins
+        # at 664, which clips the right border off the art.
         css = Gtk.CssProvider()
-        css.load_from_data(scaled_css(REPORT_CSS, 13))
+        css.load_from_data(scaled_css(REPORT_CSS, 12))
         view.get_style_context().add_provider(
             css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         report._css_provider = css
-        report.font_size = 13
+        report.font_size = 12
         view.set_left_margin(18)
         view.set_right_margin(18)
         view.set_top_margin(12)
@@ -3114,6 +3165,15 @@ class Window(Gtk.Window):
 
         view.connect("style-updated", fit_height)
         fit_height()
+
+        # The window scrolls, but Wayland draws overlay scrollbars only while
+        # scrolling: a diagram taller than the window then looks like the end of
+        # the report, and whatever follows it looks missing. Keep this one
+        # visible so the rest is obviously below the fold.
+        for widget in report.get_child().get_children():
+            if isinstance(widget, Gtk.ScrolledWindow):
+                widget.set_overlay_scrolling(False)
+
         report.show_all()
 
     def _save_transcript(self, data: dict) -> None:
