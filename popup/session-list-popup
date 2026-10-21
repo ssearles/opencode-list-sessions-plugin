@@ -1039,6 +1039,8 @@ class StatsWindow(Gtk.Window):
         self.set_type_hint(Gdk.WindowType.TOPLEVEL)
         self._sections = sections
         self.font_size = load_font_size()
+        self._text_views: list[Gtk.TextView] = []
+        self._css_provider: Gtk.CssProvider | None = None
 
         screen = Gdk.Screen.get_default()
         if screen is not None:
@@ -1151,7 +1153,7 @@ class StatsWindow(Gtk.Window):
         self.show_all()
 
     @staticmethod
-    def _view(body: str) -> Gtk.TextView:
+    def _view(body: str, font_size: int) -> Gtk.TextView:
         view = Gtk.TextView()
         view.set_editable(False)
         view.set_cursor_visible(False)
@@ -1162,13 +1164,18 @@ class StatsWindow(Gtk.Window):
         view.set_bottom_margin(4)
         view.get_buffer().set_text(body)
         view.get_style_context().add_provider(
-            _report_provider(), Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            _report_provider(font_size), Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        return view
+
+    def _add_text_view(self, view: Gtk.TextView) -> None:
+        """Track text views so they can be updated when font size changes."""
+        self._text_views.append(view)
         return view
 
     def _content(self, content) -> Gtk.Widget:
         """A TextView for text, or a folded group per directory for file lists."""
         if isinstance(content, str):
-            return self._view(content)
+            return self._add_text_view(self._view(content, self.font_size))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         for label, rows in content:
             # Each directory starts folded. Opened all at once it is the same
@@ -1176,7 +1183,7 @@ class StatsWindow(Gtk.Window):
             exp = Gtk.Expander(label=label)
             exp.get_style_context().add_class("stat-group")
             exp.set_expanded(False)
-            exp.add(self._view("\n".join(rows)))
+            exp.add(self._add_text_view(self._view("\n".join(rows), self.font_size)))
             box.pack_start(exp, False, False, 0)
         return box
 
@@ -1195,12 +1202,14 @@ class StatsWindow(Gtk.Window):
         self.font_size = size
         save_font_size(size)
 
-        # Update CSS for all TextViews in the window
+        # Update CSS only for tracked TextViews in this window
         css = Gtk.CssProvider()
-        css.load_from_data(scaled_css(CSS, self.font_size))
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), css,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        css.load_from_data(scaled_css(REPORT_CSS, self.font_size))
+        for view in self._text_views:
+            context = view.get_style_context()
+            context.remove_provider(self._css_provider) if self._css_provider else None
+            context.add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self._css_provider = css
 
     def _on_copy(self, *_args) -> None:
         """Copy through wl-copy, for the reason the main window does."""
@@ -1215,21 +1224,15 @@ class StatsWindow(Gtk.Window):
 _REPORT_PROVIDER = None
 
 
-def _report_provider() -> Gtk.CssProvider:
+def _report_provider(size: int) -> Gtk.CssProvider:
     """
-    One provider, built once: the report CSS is small and constant.
+    One provider per font size: the report CSS is small and constant.
 
-    Built from the *saved* size rather than the main window's live one, because
-    this is cached at module level and has no window to ask. That is only a
-    limitation for a report that is already open when A+ is pressed -- every
-    report opened after a change picks it up, since the report is a separate
-    window built when you click Database or Stats.
+    A provider per size avoids the issue of a stale cached provider.
     """
-    global _REPORT_PROVIDER
-    if _REPORT_PROVIDER is None:
-        _REPORT_PROVIDER = Gtk.CssProvider()
-        _REPORT_PROVIDER.load_from_data(scaled_css(REPORT_CSS, load_font_size()))
-    return _REPORT_PROVIDER
+    provider = Gtk.CssProvider()
+    provider.load_from_data(scaled_css(REPORT_CSS, size))
+    return provider
 
 
 REPORT_CSS = b"""
