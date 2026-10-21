@@ -62,18 +62,53 @@ screenshots pasted into the conversation.
 
 ## Hyprland Configuration (required for popup window)
 
-The session popup window (`session-list-popup`) is a GTK window that requests
-to be floated and centered. On Hyprland, this requires a **window rule** in
-your Hyprland config (`~/.config/hypr/looknfeel.lua` or your Hyprland config
-file):
+The session popup window (`session-list-popup`) is a GTK window. On Hyprland it
+needs a **window rule** to float and centre it, otherwise it opens as a regular
+tiled window — typically to the right of the current one.
+
+> **Agent note — check the syntax before copying.** Hyprland deprecated
+> hyprlang (`windowrulev2 = ...`) in 0.55 in favour of Lua, and the Lua
+> window-rule API has **no `center` effect**. The old
+> `windowrulev2 = center, class:^(session-list-popup)$` line therefore does not
+> translate literally; centring has to be expressed as a monitor-relative
+> `move`. Match whatever format the user's config already uses and confirm
+> against <https://wiki.hypr.land/Configuring/Basics/Window-Rules/> first.
+
+### Lua config (Hyprland 0.55+, e.g. Omarchy 4)
+
+Add to `~/.config/hypr/hyprland.lua`, or any Lua module it requires. Omarchy
+reserves the bottom of that file for personal window rules:
 
 ```lua
--- Float and center the session-list-popup window
+o.window(
+  { class = "^(session-list-popup)$" },
+  {
+    name = "opencode-session-popup",
+    float = true,
+    move = { "(monitor_w-window_w)*0.5", "(monitor_h-window_h)*0.5" },
+  }
+)
+```
+
+`move` is what centres it. The expressions are monitor-relative and contain no
+spaces, which the rule parser requires. Verified on Hyprland 0.56.2: a 1092x614
+popup on a 1366x768 display lands at (137, 77) — exactly centred.
+
+Validate after editing:
+
+```sh
+hyprctl reload
+hyprctl configerrors   # must print nothing
+```
+
+### hyprlang config (Hyprland 0.54 and older)
+
+```ini
 windowrulev2 = float, class:^(session-list-popup)$
 windowrulev2 = center, class:^(session-list-popup)$
 ```
 
-Without this rule, the popup window may open as a regular tiled window
+Without a rule, the popup window may open as a regular tiled window
 (typically to the right of the main window) instead of floating and centered.
 
 The **Architecture** window is drawn by the popup itself, so the same rule

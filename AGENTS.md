@@ -195,7 +195,12 @@ referenced relatively, which is what makes it render. Capped at `MAX_IMAGES`
 (50), and the `--text` callers get a visible placeholder instead of a file, so
 something is always noted when something was there.
 
-Hyprland floats and centres it via a rule in `~/.config/hypr/looknfeel.lua`.
+Hyprland floats and centres it via a window rule. On Lua configs (Hyprland
+0.55+, `~/.config/hypr/hyprland.lua`) that rule uses `o.window(...)` with
+`float = true` plus a monitor-relative `move` for centring — the Lua rule API
+has **no `center` effect**, so the old hyprlang `windowrulev2 = center` line
+must not be carried across. See the README's "Hyprland Configuration" section
+for the exact rule and validation steps.
 **Do not add `pin = true` to that rule**: pinning means "show on all
 workspaces", so the popup followed the user onto every workspace.
 
