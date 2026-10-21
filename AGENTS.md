@@ -514,6 +514,14 @@ by name. A report whose numbers sit under a scrollbar of file paths is a report
 nobody reads the numbers of. Copy sends `report_text()`, so the clipboard
 carries the folded sections too.
 
+**Copy must not capture `wl-copy`'s output.** `wl-copy` forks, and the child
+that serves the clipboard keeps inherited pipes open: with
+`capture_output=True`, `subprocess.run` waits for EOF that only arrives when
+the clipboard changes. An 11 KB document therefore froze the window, and Close
+with it. Output goes to `DEVNULL` now. The confirmation is a toast floating
+over the report, because the footer squeezes its status label to an ellipsis at
+this width.
+
 ### Files Are Grouped By Directory, Not Listed As Truncated Paths
 The flat form — one path per line, trimmed from the left — was unreadable.
 `_short` keeps the tail, so the leading `…` ate the part naming WHICH PROJECT,

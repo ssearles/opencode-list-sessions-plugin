@@ -274,6 +274,7 @@ sent = {}
 
 def fake_run(argv, **kwargs):
     sent["argv"] = argv
+    sent["kwargs"] = kwargs
     sent["text"] = (kwargs.get("input") or b"").decode("utf8", "replace")
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -283,11 +284,19 @@ pop.subprocess.run = fake_run
 try:
     win2 = pop.StatsWindow("probe2", pop.session_sections(s))
     win2._on_copy()
+    toast = win2._toast_label.get_text()
+    toast_shown = win2._toast_label.get_visible()
 finally:
     pop.subprocess.run = real_run
     win2.destroy()
 check("Copy goes through wl-copy", sent.get("argv") == ["wl-copy"],
       str(sent.get("argv")))
+check("and does not capture the forked child's output",
+      sent.get("kwargs", {}).get("stdout") is subprocess.DEVNULL
+      and "capture_output" not in sent.get("kwargs", {}),
+      str(sorted(sent.get("kwargs", {}))))
+check("a successful copy says so in a toast",
+      toast_shown and toast == "Copied to the clipboard", toast)
 check("and what it hands over is the whole report",
       all(h in sent.get("text", "") for h, _b in named),
       f"{len(named)} headings")
