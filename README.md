@@ -1,7 +1,8 @@
 # opencode-list-sessions-plugin
 
-Archive, list, read and restore OpenCode sessions — including sessions
-OpenCode itself can no longer bring back.
+Archive,Restore,Transcript.md,Export.json via a popup menu for OpenCode sessions — including sessions OpenCode itself can no longer bring back via typing /list_sessions on the opencode dialog window.
+
+This Opencode plugin is specific to arch Linux Omarchy OS due to the way Omarchy tiles new windows. Omarchy OS tries to steer clear of popup windows and opens new windows via tiling. This plugin may work in other Linux OS but has not been tried there. Fork this repo if you need it to work in other Linux OS.
 
 Forked from
 [`opencode-session-transcript`](https://github.com/ssearles/opencode-session-transcript),
